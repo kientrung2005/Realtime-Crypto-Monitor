@@ -22,20 +22,21 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 6
       KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
       interval: 10s
-      timeout: 5s
+      timeout: 15s
       retries: 10
-      start_period: 20s
+      start_period: 30s
     networks:
       - crypto_network
 
   spark-master:
-    image: apache/spark:4.1.3-scala2.13-java17-python3-ubuntu
+    image: apache/spark:3.4.1
     container_name: crypto-spark-master
     command:
       - /opt/spark/bin/spark-class
@@ -47,15 +48,12 @@ services:
     ports:
       - "7077:7077"
       - "8080:8080"
-    volumes:
-      - ./:/opt/spark/work-dir
-      - spark_checkpoints:/opt/spark/checkpoints
     working_dir: /opt/spark/work-dir
     networks:
       - crypto_network
 
   spark-worker:
-    image: apache/spark:4.1.3-scala2.13-java17-python3-ubuntu
+    image: apache/spark:3.4.1
     container_name: crypto-spark-worker
     command:
       - /opt/spark/bin/spark-class
@@ -67,12 +65,48 @@ services:
       SPARK_WORKER_WEBUI_PORT: 8081
     ports:
       - "8081:8081"
-    volumes:
-      - ./:/opt/spark/work-dir
-      - spark_checkpoints:/opt/spark/checkpoints
     working_dir: /opt/spark/work-dir
     depends_on:
       - spark-master
+    networks:
+      - crypto_network
+
+  kafka-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: realtime-crypto-driver:3.4.1
+    container_name: crypto-kafka-init
+    command:
+      - python3
+      - -m
+      - src.kafka.create_topics
+    volumes:
+      - ./:/opt/spark/work-dir
+    working_dir: /opt/spark/work-dir
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - crypto_network
+
+  binance-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: realtime-crypto-driver:3.4.1
+    container_name: crypto-binance-producer
+    command:
+      - python3
+      - -m
+      - src.kafka.binance_producer
+    volumes:
+      - ./:/opt/spark/work-dir
+    working_dir: /opt/spark/work-dir
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
     networks:
       - crypto_network
 
@@ -102,9 +136,46 @@ services:
     networks:
       - crypto_network
 
+  spark-streaming:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: realtime-crypto-driver:3.4.1
+    container_name: crypto-spark-streaming
+    command:
+      - spark-submit
+      - --packages
+      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.1
+      - --conf
+      - spark.jars.ivy=/opt/spark/ivy
+      - --master
+      - spark://spark-master:7077
+      - /opt/spark/work-dir/src/spark/load_to_clickhouse.py
+    environment:
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_DRIVER_HOST: spark-streaming
+    volumes:
+      - ./:/opt/spark/work-dir
+      - spark_checkpoints:/opt/spark/checkpoints
+      - spark_ivy:/opt/spark/ivy
+    working_dir: /opt/spark/work-dir
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      spark-master:
+        condition: service_started
+      spark-worker:
+        condition: service_started
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - crypto_network
+
 volumes:
   kafka_data:
   spark_checkpoints:
+  spark_ivy:
   clickhouse_data:
 
 networks:
