@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
 
@@ -79,6 +81,18 @@ class Settings:
     SPARK_CHECKPOINT_LOCATION: str = os.getenv(
         "SPARK_CHECKPOINT_LOCATION",
         "/opt/spark/checkpoints",
+    )
+    SPARK_IVY_CACHE_LOCATION: str = os.getenv(
+        "SPARK_IVY_CACHE_LOCATION",
+        "/opt/spark/ivy",
+    )
+    SPARK_DRIVER_HOST: str = os.getenv(
+        "SPARK_DRIVER_HOST",
+        "spark-streaming",
+    )
+    SPARK_EXECUTOR_PYTHON: str = os.getenv(
+        "SPARK_EXECUTOR_PYTHON",
+        "/usr/bin/python3",
     )
 
     CLICKHOUSE_HOST_LOCAL: str = os.getenv("CLICKHOUSE_HOST", "localhost")

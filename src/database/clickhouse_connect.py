@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from clickhouse_connect import get_client
 from clickhouse_connect.driver.client import Client
 

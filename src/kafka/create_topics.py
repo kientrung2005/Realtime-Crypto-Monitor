@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 
 from confluent_kafka import KafkaError, KafkaException
