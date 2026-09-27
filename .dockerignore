@@ -1,3 +1,7 @@
 *
 !Dockerfile
 !requirements.txt
+!configs/
+!configs/superset_config.py
+!scripts/
+!scripts/init_superset.py
