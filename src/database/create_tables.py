@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = PROJECT_ROOT / "sql" / "schema.sql"
-CREATE_TABLE_PATTERN = re.compile(
-    r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([^\s(]+)",
+CREATE_SCHEMA_OBJECT_PATTERN = re.compile(
+    r"CREATE\s+(TABLE|VIEW)\s+IF\s+NOT\s+EXISTS\s+([^\s(]+)",
     re.IGNORECASE,
 )
 
@@ -59,9 +59,14 @@ def create_tables(schema_path: Path = SCHEMA_PATH) -> None:
     ) as client:
         for statement in statements:
             client.command(statement)
-            match = CREATE_TABLE_PATTERN.search(statement)
-            table_name = match.group(1) if match else "unknown"
-            logger.info("Created or verified ClickHouse table: %s", table_name)
+            match = CREATE_SCHEMA_OBJECT_PATTERN.search(statement)
+            object_type = match.group(1).lower() if match else "object"
+            object_name = match.group(2) if match else "unknown"
+            logger.info(
+                "Created or verified ClickHouse %s: %s",
+                object_type,
+                object_name,
+            )
 
     logger.info("ClickHouse schema initialized successfully.")
 
