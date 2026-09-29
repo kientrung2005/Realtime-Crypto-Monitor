@@ -4,16 +4,23 @@ from pyspark.sql import DataFrame
 from pyspark.sql.functions import (
     coalesce,
     col,
+    count,
     current_timestamp,
     expr,
     from_json,
     length,
     lit,
+    max as spark_max,
+    max_by,
+    min as spark_min,
+    min_by,
     struct,
+    sum as spark_sum,
     to_json,
     trim,
     upper,
     when,
+    window,
 )
 from pyspark.sql.types import (
     BooleanType,
@@ -149,17 +156,89 @@ def transform_agg_trades(
         )
     )
 
-    if kafka_df.isStreaming:
-        valid_df = (
+    invalid_df = validated_df.filter(col("error_reason").isNotNull())
+    return valid_df, invalid_df
+
+
+def deduplicate_agg_trades(valid_df: DataFrame) -> DataFrame:
+    if valid_df.isStreaming:
+        return (
             valid_df
             .withWatermark("trade_time", "2 minutes")
             .dropDuplicates(["symbol", "agg_trade_id", "trade_time"])
         )
-    else:
-        valid_df = valid_df.dropDuplicates(["symbol", "agg_trade_id"])
 
-    invalid_df = validated_df.filter(col("error_reason").isNotNull())
-    return valid_df, invalid_df
+    return valid_df.dropDuplicates(["symbol", "agg_trade_id"])
+
+
+def aggregate_market_candles(
+    valid_df: DataFrame,
+    window_duration: str = "1 minute",
+    interval: str = "1m",
+) -> DataFrame:
+    zero = lit(0).cast(DECIMAL_TYPE)
+    trade_order = struct(col("trade_time"), col("agg_trade_id"))
+
+    aggregated_df = (
+        valid_df
+        .withWatermark("trade_time", "2 minutes")
+        .groupBy(
+            col("symbol"),
+            window(col("trade_time"), window_duration).alias("trade_window"),
+        )
+        .agg(
+            min_by(col("price"), trade_order).alias("open_price"),
+            spark_max("price").alias("high_price"),
+            spark_min("price").alias("low_price"),
+            max_by(col("price"), trade_order).alias("close_price"),
+            spark_sum("quantity").alias("base_volume"),
+            spark_sum("quote_quantity").alias("quote_volume"),
+            count(lit(1)).alias("trade_count"),
+            spark_sum(
+                when(col("taker_side") == "BUY", col("quantity"))
+                .otherwise(zero)
+            ).alias("buy_volume"),
+            spark_sum(
+                when(col("taker_side") == "SELL", col("quantity"))
+                .otherwise(zero)
+            ).alias("sell_volume"),
+        )
+    )
+
+    return aggregated_df.select(
+        "symbol",
+        lit(interval).alias("interval"),
+        col("trade_window.start").alias("window_start"),
+        col("trade_window.end").alias("window_end"),
+        col("open_price").cast(DECIMAL_TYPE),
+        col("high_price").cast(DECIMAL_TYPE),
+        col("low_price").cast(DECIMAL_TYPE),
+        col("close_price").cast(DECIMAL_TYPE),
+        col("base_volume").cast(DECIMAL_TYPE),
+        col("quote_volume").cast(DECIMAL_TYPE),
+        "trade_count",
+        when(
+            col("base_volume") > 0,
+            col("quote_volume") / col("base_volume"),
+        ).otherwise(zero).cast(DECIMAL_TYPE).alias("vwap"),
+        col("buy_volume").cast(DECIMAL_TYPE),
+        col("sell_volume").cast(DECIMAL_TYPE),
+        when(
+            col("base_volume") > 0,
+            col("buy_volume") * 100 / col("base_volume"),
+        ).otherwise(zero).cast(DECIMAL_TYPE).alias("buy_pressure"),
+        when(
+            col("base_volume") > 0,
+            col("sell_volume") * 100 / col("base_volume"),
+        ).otherwise(zero).cast(DECIMAL_TYPE).alias("sell_pressure"),
+        when(
+            col("open_price") > 0,
+            (col("high_price") - col("low_price"))
+            * 100
+            / col("open_price"),
+        ).otherwise(zero).cast(DECIMAL_TYPE).alias("volatility"),
+        current_timestamp().alias("updated_at"),
+    )
 
 
 def format_dead_letter_records(

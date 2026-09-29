@@ -17,6 +17,8 @@ from configs.settings import settings
 from src.database.clickhouse_connect import ClickHouseConnect
 from src.spark.spark_connect import SparkConnect
 from src.spark.transformation import (
+    aggregate_market_candles,
+    deduplicate_agg_trades,
     format_dead_letter_records,
     transform_agg_trades,
 )
@@ -24,8 +26,8 @@ from src.spark.transformation import (
 
 logger = logging.getLogger(__name__)
 
-CLICKHOUSE_TABLE = "fact_agg_trades"
-CLICKHOUSE_COLUMNS = (
+AGG_TRADES_TABLE = "fact_agg_trades"
+AGG_TRADES_COLUMNS = (
     "schema_version",
     "exchange",
     "market_type",
@@ -45,6 +47,27 @@ CLICKHOUSE_COLUMNS = (
     "kafka_timestamp",
     "processed_at",
 )
+CANDLES_TABLE = "agg_market_candles"
+CANDLES_COLUMNS = (
+    "symbol",
+    "interval",
+    "window_start",
+    "window_end",
+    "open_price",
+    "high_price",
+    "low_price",
+    "close_price",
+    "base_volume",
+    "quote_volume",
+    "trade_count",
+    "vwap",
+    "buy_volume",
+    "sell_volume",
+    "buy_pressure",
+    "sell_pressure",
+    "volatility",
+    "updated_at",
+)
 CLICKHOUSE_INSERT_BATCH_SIZE = 5_000
 
 
@@ -55,12 +78,13 @@ def _checkpoint_location(query_name: str) -> str:
 
 def _row_batches(
     rows: Iterator[Row],
+    columns: tuple[str, ...],
     batch_size: int,
 ) -> Iterator[list[list[object]]]:
     batch: list[list[object]] = []
 
     for row in rows:
-        batch.append([row[column_name] for column_name in CLICKHOUSE_COLUMNS])
+        batch.append([row[column_name] for column_name in columns])
         if len(batch) >= batch_size:
             yield batch
             batch = []
@@ -69,8 +93,13 @@ def _row_batches(
         yield batch
 
 
-def _write_clickhouse_batch(batch_df: DataFrame, batch_id: int) -> None:
-    rows = batch_df.select(*CLICKHOUSE_COLUMNS).toLocalIterator()
+def _write_table_batch(
+    batch_df: DataFrame,
+    batch_id: int,
+    table: str,
+    columns: tuple[str, ...],
+) -> None:
+    rows = batch_df.select(*columns).toLocalIterator()
     inserted_rows = 0
 
     with ClickHouseConnect(
@@ -80,11 +109,15 @@ def _write_clickhouse_batch(batch_df: DataFrame, batch_id: int) -> None:
         password=settings.CLICKHOUSE_PASSWORD,
         database=settings.CLICKHOUSE_DATABASE,
     ) as client:
-        for row_batch in _row_batches(rows, CLICKHOUSE_INSERT_BATCH_SIZE):
+        for row_batch in _row_batches(
+            rows,
+            columns,
+            CLICKHOUSE_INSERT_BATCH_SIZE,
+        ):
             client.insert(
-                table=CLICKHOUSE_TABLE,
+                table=table,
                 data=row_batch,
-                column_names=list(CLICKHOUSE_COLUMNS),
+                column_names=list(columns),
             )
             inserted_rows += len(row_batch)
 
@@ -92,7 +125,25 @@ def _write_clickhouse_batch(batch_df: DataFrame, batch_id: int) -> None:
         "Spark batch %d inserted %d row(s) into ClickHouse table %s",
         batch_id,
         inserted_rows,
-        CLICKHOUSE_TABLE,
+        table,
+    )
+
+
+def _write_agg_trades_batch(batch_df: DataFrame, batch_id: int) -> None:
+    _write_table_batch(
+        batch_df,
+        batch_id,
+        AGG_TRADES_TABLE,
+        AGG_TRADES_COLUMNS,
+    )
+
+
+def _write_market_candles_batch(batch_df: DataFrame, batch_id: int) -> None:
+    _write_table_batch(
+        batch_df,
+        batch_id,
+        CANDLES_TABLE,
+        CANDLES_COLUMNS,
     )
 
 
@@ -111,15 +162,30 @@ def _read_kafka_stream(spark: SparkSession) -> DataFrame:
 def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
     kafka_df = _read_kafka_stream(spark)
     valid_df, invalid_df = transform_agg_trades(kafka_df)
+    deduplicated_valid_df = deduplicate_agg_trades(valid_df)
 
     clickhouse_query = (
-        valid_df.writeStream
+        deduplicated_valid_df.writeStream
         .queryName("agg_trades_to_clickhouse")
         .outputMode("append")
-        .foreachBatch(_write_clickhouse_batch)
+        .foreachBatch(_write_agg_trades_batch)
         .option(
             "checkpointLocation",
             _checkpoint_location("agg_trades_to_clickhouse"),
+        )
+        .trigger(processingTime="10 seconds")
+        .start()
+    )
+
+    market_candles_df = aggregate_market_candles(valid_df)
+    market_candles_query = (
+        market_candles_df.writeStream
+        .queryName("agg_market_candles_1m_to_clickhouse")
+        .outputMode("update")
+        .foreachBatch(_write_market_candles_batch)
+        .option(
+            "checkpointLocation",
+            _checkpoint_location("agg_market_candles_1m_to_clickhouse"),
         )
         .trigger(processingTime="10 seconds")
         .start()
@@ -144,7 +210,7 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
         .start()
     )
 
-    return [clickhouse_query, dead_letter_query]
+    return [clickhouse_query, market_candles_query, dead_letter_query]
 
 
 def run() -> None:
@@ -154,9 +220,11 @@ def run() -> None:
     try:
         queries = _start_queries(spark)
         logger.info(
-            "Spark is consuming %s and writing valid rows to %s",
+            "Spark is consuming %s and writing trades to %s and 1-minute "
+            "candles to %s",
             settings.KAFKA_AGG_TRADES_TOPIC,
-            CLICKHOUSE_TABLE,
+            AGG_TRADES_TABLE,
+            CANDLES_TABLE,
         )
         spark.streams.awaitAnyTermination()
     finally:
