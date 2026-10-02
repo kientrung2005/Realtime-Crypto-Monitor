@@ -8,6 +8,7 @@ from pyspark.sql.functions import (
     current_timestamp,
     expr,
     from_json,
+    get_json_object,
     length,
     lit,
     max as spark_max,
@@ -48,7 +49,6 @@ AGG_TRADE_SCHEMA = StructType(
         StructField("m", BooleanType(), True),
     ]
 )
-
 
 def transform_agg_trades(
     kafka_df: DataFrame,
@@ -169,6 +169,179 @@ def deduplicate_agg_trades(valid_df: DataFrame) -> DataFrame:
         )
 
     return valid_df.dropDuplicates(["symbol", "agg_trade_id"])
+
+
+def transform_book_tickers(
+    kafka_df: DataFrame,
+) -> tuple[DataFrame, DataFrame]:
+    parsed_df = kafka_df.select(
+        col("key").cast("string").alias("kafka_key"),
+        col("value").cast("string").alias("raw_value"),
+        col("partition").cast("int").alias("kafka_partition"),
+        col("offset").cast("long").alias("kafka_offset"),
+        col("timestamp").alias("kafka_timestamp"),
+    )
+
+    normalized_df = parsed_df.select(
+        "kafka_key",
+        "raw_value",
+        "kafka_partition",
+        "kafka_offset",
+        "kafka_timestamp",
+        get_json_object("raw_value", "$.u")
+        .cast("long")
+        .alias("update_id"),
+        upper(trim(get_json_object("raw_value", "$.s"))).alias("symbol"),
+        get_json_object("raw_value", "$.b")
+        .cast(DECIMAL_TYPE)
+        .alias("best_bid_price"),
+        get_json_object("raw_value", "$.B")
+        .cast(DECIMAL_TYPE)
+        .alias("best_bid_quantity"),
+        get_json_object("raw_value", "$.a")
+        .cast(DECIMAL_TYPE)
+        .alias("best_ask_price"),
+        get_json_object("raw_value", "$.A")
+        .cast(DECIMAL_TYPE)
+        .alias("best_ask_quantity"),
+    )
+
+    error_reason = (
+        when(
+            col("raw_value").isNull()
+            | (length(trim(col("raw_value"))) == 0),
+            lit("empty_payload"),
+        )
+        .when(
+            col("update_id").isNull(),
+            lit("invalid_json_or_missing_update_id"),
+        )
+        .when(
+            col("symbol").isNull() | (length(col("symbol")) == 0),
+            lit("missing_symbol"),
+        )
+        .when(
+            col("kafka_key").isNotNull()
+            & (upper(trim(col("kafka_key"))) != col("symbol")),
+            lit("kafka_key_symbol_mismatch"),
+        )
+        .when(
+            col("best_bid_price").isNull() | (col("best_bid_price") <= 0),
+            lit("invalid_best_bid_price"),
+        )
+        .when(
+            col("best_ask_price").isNull() | (col("best_ask_price") <= 0),
+            lit("invalid_best_ask_price"),
+        )
+        .when(
+            col("best_bid_quantity").isNull()
+            | (col("best_bid_quantity") < 0),
+            lit("invalid_best_bid_quantity"),
+        )
+        .when(
+            col("best_ask_quantity").isNull()
+            | (col("best_ask_quantity") < 0),
+            lit("invalid_best_ask_quantity"),
+        )
+        .when(
+            col("best_ask_price") < col("best_bid_price"),
+            lit("crossed_quote"),
+        )
+        .when(col("kafka_timestamp").isNull(), lit("missing_kafka_timestamp"))
+    )
+
+    validated_df = normalized_df.withColumn("error_reason", error_reason)
+    valid_df = (
+        validated_df
+        .filter(col("error_reason").isNull())
+        .select(
+            lit("binance").alias("exchange"),
+            lit("spot").alias("market_type"),
+            "symbol",
+            "update_id",
+            "best_bid_price",
+            "best_bid_quantity",
+            "best_ask_price",
+            "best_ask_quantity",
+            "kafka_partition",
+            "kafka_offset",
+            "kafka_timestamp",
+        )
+    )
+
+    invalid_df = validated_df.filter(col("error_reason").isNotNull())
+    return valid_df, invalid_df
+
+
+def aggregate_quote_snapshots(
+    valid_df: DataFrame,
+    window_duration: str = "1 second",
+    watermark_delay: str = "5 seconds",
+) -> DataFrame:
+    quote_order = struct(
+        col("kafka_timestamp"),
+        col("update_id"),
+        col("kafka_partition"),
+        col("kafka_offset"),
+    )
+    quote_value = struct(
+        "update_id",
+        "best_bid_price",
+        "best_bid_quantity",
+        "best_ask_price",
+        "best_ask_quantity",
+        "kafka_partition",
+        "kafka_offset",
+        "kafka_timestamp",
+    )
+
+    aggregated_df = (
+        valid_df
+        .withWatermark("kafka_timestamp", watermark_delay)
+        .groupBy(
+            "exchange",
+            "market_type",
+            "symbol",
+            window(
+                col("kafka_timestamp"),
+                window_duration,
+            ).alias("snapshot_window"),
+        )
+        .agg(max_by(quote_value, quote_order).alias("latest"))
+    )
+
+    best_bid_price = col("latest.best_bid_price")
+    best_ask_price = col("latest.best_ask_price")
+    mid_price = ((best_bid_price + best_ask_price) / lit(2)).cast(
+        DECIMAL_TYPE
+    )
+    spread = (best_ask_price - best_bid_price).cast(DECIMAL_TYPE)
+
+    return aggregated_df.select(
+        "exchange",
+        "market_type",
+        "symbol",
+        col("latest.update_id").alias("update_id"),
+        col("latest.kafka_timestamp").alias("snapshot_time"),
+        best_bid_price.cast(DECIMAL_TYPE).alias("best_bid_price"),
+        col("latest.best_bid_quantity")
+        .cast(DECIMAL_TYPE)
+        .alias("best_bid_quantity"),
+        best_ask_price.cast(DECIMAL_TYPE).alias("best_ask_price"),
+        col("latest.best_ask_quantity")
+        .cast(DECIMAL_TYPE)
+        .alias("best_ask_quantity"),
+        mid_price.alias("mid_price"),
+        spread.alias("spread"),
+        when(
+            mid_price > 0,
+            spread * 100 / mid_price,
+        ).otherwise(lit(0)).cast(DECIMAL_TYPE).alias("spread_percentage"),
+        col("latest.kafka_partition").alias("kafka_partition"),
+        col("latest.kafka_offset").alias("kafka_offset"),
+        col("latest.kafka_timestamp").alias("kafka_timestamp"),
+        current_timestamp().alias("processed_at"),
+    )
 
 
 def aggregate_market_candles(

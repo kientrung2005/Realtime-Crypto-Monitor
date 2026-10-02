@@ -31,7 +31,14 @@ class Settings:
         "wss://stream.binance.com:9443/ws",
     )
     BINANCE_SYMBOLS: tuple[str, ...] = _get_symbols()
-    BINANCE_STREAM: str = os.getenv("BINANCE_STREAM", "aggTrade")
+    BINANCE_AGG_TRADES_STREAM: str = os.getenv(
+        "BINANCE_AGG_TRADES_STREAM",
+        os.getenv("BINANCE_STREAM", "aggTrade"),
+    )
+    BINANCE_BOOK_TICKER_STREAM: str = os.getenv(
+        "BINANCE_BOOK_TICKER_STREAM",
+        "bookTicker",
+    )
 
     KAFKA_BOOTSTRAP_SERVERS_HOST: str = os.getenv(
         "KAFKA_BOOTSTRAP_SERVERS",
@@ -49,6 +56,10 @@ class Settings:
     KAFKA_NUM_PARTITIONS: int = _get_int("KAFKA_NUM_PARTITIONS", 6)
     KAFKA_REPLICATION_FACTOR: int = _get_int("KAFKA_REPLICATION_FACTOR", 1)
     KAFKA_RETENTION_HOURS: int = _get_int("KAFKA_RETENTION_HOURS", 24)
+    KAFKA_BOOK_TICKER_RETENTION_HOURS: int = _get_int(
+        "KAFKA_BOOK_TICKER_RETENTION_HOURS",
+        6,
+    )
     KAFKA_AGG_TRADES_TOPIC: str = os.getenv(
         "KAFKA_AGG_TRADES_TOPIC",
         "binance.spot.agg-trades.v1",
@@ -64,6 +75,14 @@ class Settings:
     KAFKA_DEAD_LETTER_TOPIC: str = os.getenv(
         "KAFKA_DEAD_LETTER_TOPIC",
         "binance.dead-letter.v1",
+    )
+    QUOTE_SNAPSHOT_INTERVAL_SECONDS: int = _get_int(
+        "QUOTE_SNAPSHOT_INTERVAL_SECONDS",
+        1,
+    )
+    QUOTE_SNAPSHOT_WATERMARK_SECONDS: int = _get_int(
+        "QUOTE_SNAPSHOT_WATERMARK_SECONDS",
+        5,
     )
 
     SPARK_MASTER_URL_HOST: str = os.getenv("SPARK_MASTER_URL_HOST", "local[*]")

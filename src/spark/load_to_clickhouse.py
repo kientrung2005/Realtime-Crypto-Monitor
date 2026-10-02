@@ -18,9 +18,11 @@ from src.database.clickhouse_connect import ClickHouseConnect
 from src.spark.spark_connect import SparkConnect
 from src.spark.transformation import (
     aggregate_market_candles,
+    aggregate_quote_snapshots,
     deduplicate_agg_trades,
     format_dead_letter_records,
     transform_agg_trades,
+    transform_book_tickers,
 )
 
 
@@ -67,6 +69,25 @@ CANDLES_COLUMNS = (
     "sell_pressure",
     "volatility",
     "updated_at",
+)
+QUOTE_SNAPSHOTS_TABLE = "fact_quote_snapshots"
+QUOTE_SNAPSHOTS_COLUMNS = (
+    "exchange",
+    "market_type",
+    "symbol",
+    "update_id",
+    "snapshot_time",
+    "best_bid_price",
+    "best_bid_quantity",
+    "best_ask_price",
+    "best_ask_quantity",
+    "mid_price",
+    "spread",
+    "spread_percentage",
+    "kafka_partition",
+    "kafka_offset",
+    "kafka_timestamp",
+    "processed_at",
 )
 CLICKHOUSE_INSERT_BATCH_SIZE = 5_000
 
@@ -147,12 +168,21 @@ def _write_market_candles_batch(batch_df: DataFrame, batch_id: int) -> None:
     )
 
 
-def _read_kafka_stream(spark: SparkSession) -> DataFrame:
+def _write_quote_snapshots_batch(batch_df: DataFrame, batch_id: int) -> None:
+    _write_table_batch(
+        batch_df,
+        batch_id,
+        QUOTE_SNAPSHOTS_TABLE,
+        QUOTE_SNAPSHOTS_COLUMNS,
+    )
+
+
+def _read_kafka_stream(spark: SparkSession, topic: str) -> DataFrame:
     return (
         spark.readStream
         .format("kafka")
         .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
-        .option("subscribe", settings.KAFKA_AGG_TRADES_TOPIC)
+        .option("subscribe", topic)
         .option("startingOffsets", "earliest")
         .option("failOnDataLoss", "true")
         .load()
@@ -160,8 +190,11 @@ def _read_kafka_stream(spark: SparkSession) -> DataFrame:
 
 
 def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
-    kafka_df = _read_kafka_stream(spark)
-    valid_df, invalid_df = transform_agg_trades(kafka_df)
+    agg_trades_kafka_df = _read_kafka_stream(
+        spark,
+        settings.KAFKA_AGG_TRADES_TOPIC,
+    )
+    valid_df, invalid_df = transform_agg_trades(agg_trades_kafka_df)
     deduplicated_valid_df = deduplicate_agg_trades(valid_df)
 
     clickhouse_query = (
@@ -210,7 +243,61 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
         .start()
     )
 
-    return [clickhouse_query, market_candles_query, dead_letter_query]
+    book_ticker_kafka_df = _read_kafka_stream(
+        spark,
+        settings.KAFKA_BOOK_TICKER_TOPIC,
+    )
+    valid_book_ticker_df, invalid_book_ticker_df = transform_book_tickers(
+        book_ticker_kafka_df
+    )
+    quote_snapshots_df = aggregate_quote_snapshots(
+        valid_book_ticker_df,
+        window_duration=(
+            f"{settings.QUOTE_SNAPSHOT_INTERVAL_SECONDS} seconds"
+        ),
+        watermark_delay=(
+            f"{settings.QUOTE_SNAPSHOT_WATERMARK_SECONDS} seconds"
+        ),
+    )
+    quote_snapshots_query = (
+        quote_snapshots_df.writeStream
+        .queryName("quote_snapshots_to_clickhouse")
+        .outputMode("append")
+        .foreachBatch(_write_quote_snapshots_batch)
+        .option(
+            "checkpointLocation",
+            _checkpoint_location("quote_snapshots_to_clickhouse"),
+        )
+        .trigger(processingTime="10 seconds")
+        .start()
+    )
+
+    invalid_book_ticker_dead_letter_df = format_dead_letter_records(
+        invalid_book_ticker_df,
+        settings.KAFKA_BOOK_TICKER_TOPIC,
+    )
+    invalid_book_ticker_query = (
+        invalid_book_ticker_dead_letter_df.writeStream
+        .queryName("invalid_book_tickers_to_dlq")
+        .format("kafka")
+        .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
+        .option("topic", settings.KAFKA_DEAD_LETTER_TOPIC)
+        .option(
+            "checkpointLocation",
+            _checkpoint_location("invalid_book_tickers_to_dlq"),
+        )
+        .outputMode("append")
+        .trigger(processingTime="10 seconds")
+        .start()
+    )
+
+    return [
+        clickhouse_query,
+        market_candles_query,
+        dead_letter_query,
+        quote_snapshots_query,
+        invalid_book_ticker_query,
+    ]
 
 
 def run() -> None:
@@ -220,11 +307,13 @@ def run() -> None:
     try:
         queries = _start_queries(spark)
         logger.info(
-            "Spark is consuming %s and writing trades to %s and 1-minute "
-            "candles to %s",
+            "Spark is consuming %s and %s; writing trades to %s, "
+            "1-minute candles to %s, and quote snapshots to %s",
             settings.KAFKA_AGG_TRADES_TOPIC,
+            settings.KAFKA_BOOK_TICKER_TOPIC,
             AGG_TRADES_TABLE,
             CANDLES_TABLE,
+            QUOTE_SNAPSHOTS_TABLE,
         )
         spark.streams.awaitAnyTermination()
     finally:

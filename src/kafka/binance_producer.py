@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Sequence
 
@@ -18,7 +19,7 @@ class BinanceProducer:
         self._producer = Producer(
             {
                 "bootstrap.servers": settings.KAFKA_BOOTSTRAP_SERVERS,
-                "client.id": "binance-agg-trades-producer",
+                "client.id": "binance-market-data-producer",
                 "acks": "all",
                 "enable.idempotence": True,
                 "compression.type": "gzip",
@@ -36,16 +37,22 @@ class BinanceProducer:
                 error,
             )
 
-    async def publish(self, symbol: str, payload: str | bytes) -> None:
+    async def publish(
+        self,
+        topic: str,
+        event_type: str,
+        symbol: str,
+        payload: str | bytes,
+    ) -> None:
         while True:
             try:
                 self._producer.produce(
-                    topic=settings.KAFKA_AGG_TRADES_TOPIC,
+                    topic=topic,
                     key=symbol,
                     value=payload,
                     headers={
                         "source": "binance",
-                        "event_type": settings.BINANCE_STREAM,
+                        "event_type": event_type,
                         "schema_version": "1",
                     },
                     on_delivery=self._delivery_report,
@@ -68,37 +75,102 @@ class BinanceProducer:
             logger.info("Kafka producer stopped after delivering all queued messages.")
 
 
-def _stream_url(symbol: str) -> str:
-    base_url = settings.BINANCE_WEBSOCKET_URL.rstrip("/")
-    stream_name = f"{symbol.lower()}@{settings.BINANCE_STREAM}"
-    return f"{base_url}/{stream_name}"
+def _subscription_streams(symbols: Sequence[str]) -> tuple[str, ...]:
+    return tuple(
+        stream
+        for symbol in symbols
+        for stream in (
+            f"{symbol.lower()}@{settings.BINANCE_AGG_TRADES_STREAM}",
+            f"{symbol.lower()}@{settings.BINANCE_BOOK_TICKER_STREAM}",
+        )
+    )
 
 
-async def _stream_symbol(symbol: str, producer: BinanceProducer) -> None:
+def _route_payload(payload: str | bytes) -> tuple[str, str, str] | None:
+    try:
+        event = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Received invalid JSON from Binance WebSocket.")
+        return None
+
+    if not isinstance(event, dict):
+        logger.warning("Received unsupported Binance payload type.")
+        return None
+
+    symbol = str(event.get("s", "")).strip().upper()
+    if not symbol:
+        # Subscription acknowledgements do not contain a symbol.
+        return None
+
+    if event.get("e") == "aggTrade":
+        return (
+            settings.KAFKA_AGG_TRADES_TOPIC,
+            settings.BINANCE_AGG_TRADES_STREAM,
+            symbol,
+        )
+
+    if all(field in event for field in ("u", "b", "B", "a", "A")):
+        return (
+            settings.KAFKA_BOOK_TICKER_TOPIC,
+            settings.BINANCE_BOOK_TICKER_STREAM,
+            symbol,
+        )
+
+    logger.debug("Ignoring unsupported Binance event for %s.", symbol)
+    return None
+
+
+async def _stream_market_data(
+    symbols: Sequence[str],
+    producer: BinanceProducer,
+) -> None:
     reconnect_delay = 1
-    url = _stream_url(symbol)
+    streams = _subscription_streams(symbols)
+    subscription = json.dumps(
+        {
+            "method": "SUBSCRIBE",
+            "params": list(streams),
+            "id": 1,
+        }
+    )
 
     while True:
         try:
-            logger.info("Connecting to Binance stream for %s", symbol)
+            logger.info(
+                "Connecting to Binance WebSocket for %d market stream(s)",
+                len(streams),
+            )
             async with connect(
-                url,
+                settings.BINANCE_WEBSOCKET_URL,
                 ping_interval=20,
                 ping_timeout=20,
                 close_timeout=10,
                 max_queue=1_000,
             ) as websocket:
-                logger.info("Connected to Binance stream for %s", symbol)
+                await websocket.send(subscription)
+                logger.info(
+                    "Subscribed to Binance streams: %s",
+                    ", ".join(streams),
+                )
                 reconnect_delay = 1
 
                 async for payload in websocket:
-                    await producer.publish(symbol, payload)
+                    route = _route_payload(payload)
+                    if route is None:
+                        continue
+
+                    topic, event_type, symbol = route
+                    await producer.publish(
+                        topic,
+                        event_type,
+                        symbol,
+                        payload,
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as error:
             logger.warning(
-                "Binance stream for %s disconnected: %s. Reconnecting in %d second(s).",
-                symbol,
+                "Binance WebSocket disconnected: %s. Reconnecting in %d second(s).",
                 error,
                 reconnect_delay,
             )
@@ -113,18 +185,14 @@ async def run(symbols: Sequence[str] | None = None) -> None:
 
     producer = BinanceProducer()
     logger.info(
-        "Starting Binance producer for %s; Kafka topic: %s",
+        "Starting Binance producer for %s; Kafka topics: %s, %s",
         ", ".join(selected_symbols),
         settings.KAFKA_AGG_TRADES_TOPIC,
+        settings.KAFKA_BOOK_TICKER_TOPIC,
     )
 
     try:
-        await asyncio.gather(
-            *(
-                _stream_symbol(symbol, producer)
-                for symbol in selected_symbols
-            )
-        )
+        await _stream_market_data(selected_symbols, producer)
     finally:
         producer.close()
 

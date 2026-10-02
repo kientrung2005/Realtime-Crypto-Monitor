@@ -17,6 +17,12 @@ def _topic_definitions() -> list[NewTopic]:
         "cleanup.policy": "delete",
         "retention.ms": retention_ms,
     }
+    book_ticker_topic_config = {
+        "cleanup.policy": "delete",
+        "retention.ms": str(
+            settings.KAFKA_BOOK_TICKER_RETENTION_HOURS * 60 * 60 * 1000
+        ),
+    }
 
     return [
         NewTopic(
@@ -24,6 +30,12 @@ def _topic_definitions() -> list[NewTopic]:
             num_partitions=settings.KAFKA_NUM_PARTITIONS,
             replication_factor=settings.KAFKA_REPLICATION_FACTOR,
             config=topic_config,
+        ),
+        NewTopic(
+            topic=settings.KAFKA_BOOK_TICKER_TOPIC,
+            num_partitions=settings.KAFKA_NUM_PARTITIONS,
+            replication_factor=settings.KAFKA_REPLICATION_FACTOR,
+            config=book_ticker_topic_config,
         ),
         NewTopic(
             topic=settings.KAFKA_DEAD_LETTER_TOPIC,
