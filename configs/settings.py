@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 from pathlib import Path
 
@@ -12,6 +10,10 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 def _get_int(name: str, default: int) -> int:
     return int(os.getenv(name, str(default)))
+
+
+def _get_float(name: str, default: float) -> float:
+    return float(os.getenv(name, str(default)))
 
 
 def _get_symbols() -> tuple[str, ...]:
@@ -83,6 +85,22 @@ class Settings:
     QUOTE_SNAPSHOT_WATERMARK_SECONDS: int = _get_int(
         "QUOTE_SNAPSHOT_WATERMARK_SECONDS",
         5,
+    )
+    ALERT_CANDLE_WATERMARK_SECONDS: int = _get_int(
+        "ALERT_CANDLE_WATERMARK_SECONDS",
+        10,
+    )
+    ALERT_VOLATILITY_THRESHOLD_PERCENT: float = _get_float(
+        "ALERT_VOLATILITY_THRESHOLD_PERCENT",
+        0.5,
+    )
+    ALERT_PRESSURE_THRESHOLD_PERCENT: float = _get_float(
+        "ALERT_PRESSURE_THRESHOLD_PERCENT",
+        75.0,
+    )
+    ALERT_QUOTE_VOLUME_THRESHOLD_USDT: float = _get_float(
+        "ALERT_QUOTE_VOLUME_THRESHOLD_USDT",
+        5_000_000.0,
     )
 
     SPARK_MASTER_URL_HOST: str = os.getenv("SPARK_MASTER_URL_HOST", "local[*]")

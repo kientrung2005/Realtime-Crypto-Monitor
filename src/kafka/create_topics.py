@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 
 from confluent_kafka import KafkaError, KafkaException
@@ -36,6 +34,12 @@ def _topic_definitions() -> list[NewTopic]:
             num_partitions=settings.KAFKA_NUM_PARTITIONS,
             replication_factor=settings.KAFKA_REPLICATION_FACTOR,
             config=book_ticker_topic_config,
+        ),
+        NewTopic(
+            topic=settings.KAFKA_ALERTS_TOPIC,
+            num_partitions=settings.KAFKA_NUM_PARTITIONS,
+            replication_factor=settings.KAFKA_REPLICATION_FACTOR,
+            config=topic_config,
         ),
         NewTopic(
             topic=settings.KAFKA_DEAD_LETTER_TOPIC,

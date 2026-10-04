@@ -1,11 +1,13 @@
-from __future__ import annotations
-
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import (
+    array,
     coalesce,
     col,
+    concat_ws,
     count,
     current_timestamp,
+    date_format,
+    explode,
     expr,
     from_json,
     get_json_object,
@@ -348,13 +350,14 @@ def aggregate_market_candles(
     valid_df: DataFrame,
     window_duration: str = "1 minute",
     interval: str = "1m",
+    watermark_delay: str = "2 minutes",
 ) -> DataFrame:
     zero = lit(0).cast(DECIMAL_TYPE)
     trade_order = struct(col("trade_time"), col("agg_trade_id"))
 
     aggregated_df = (
         valid_df
-        .withWatermark("trade_time", "2 minutes")
+        .withWatermark("trade_time", watermark_delay)
         .groupBy(
             col("symbol"),
             window(col("trade_time"), window_duration).alias("trade_window"),
@@ -411,6 +414,126 @@ def aggregate_market_candles(
             / col("open_price"),
         ).otherwise(zero).cast(DECIMAL_TYPE).alias("volatility"),
         current_timestamp().alias("updated_at"),
+    )
+
+
+def generate_market_alerts(
+    candles_df: DataFrame,
+    volatility_threshold_percent: float,
+    pressure_threshold_percent: float,
+    quote_volume_threshold_usdt: float,
+) -> DataFrame:
+    """Create one alert row per rule triggered by a completed candle."""
+
+    volatility_threshold = lit(volatility_threshold_percent).cast(DECIMAL_TYPE)
+    pressure_threshold = lit(pressure_threshold_percent).cast(DECIMAL_TYPE)
+    volume_threshold = lit(quote_volume_threshold_usdt).cast(DECIMAL_TYPE)
+
+    def alert_candidate(
+        condition: object,
+        alert_type: str,
+        metric_name: str,
+        metric_value: object,
+        threshold_value: object,
+        message: str,
+        critical_condition: object,
+    ) -> object:
+        return when(
+            condition,
+            struct(
+                lit(alert_type).alias("alert_type"),
+                when(critical_condition, lit("CRITICAL"))
+                .otherwise(lit("HIGH"))
+                .alias("severity"),
+                lit(metric_name).alias("metric_name"),
+                metric_value.cast(DECIMAL_TYPE).alias("metric_value"),
+                threshold_value.cast(DECIMAL_TYPE).alias("threshold_value"),
+                lit(message).alias("message"),
+            ),
+        )
+
+    candidates = array(
+        alert_candidate(
+            col("volatility") >= volatility_threshold,
+            "HIGH_VOLATILITY",
+            "volatility_percent",
+            col("volatility"),
+            volatility_threshold,
+            "1-minute price volatility exceeded the configured threshold.",
+            col("volatility") >= volatility_threshold * lit(2),
+        ),
+        alert_candidate(
+            col("buy_pressure") >= pressure_threshold,
+            "BUY_PRESSURE",
+            "buy_pressure_percent",
+            col("buy_pressure"),
+            pressure_threshold,
+            "1-minute buy pressure exceeded the configured threshold.",
+            col("buy_pressure") >= pressure_threshold + lit(15),
+        ),
+        alert_candidate(
+            col("sell_pressure") >= pressure_threshold,
+            "SELL_PRESSURE",
+            "sell_pressure_percent",
+            col("sell_pressure"),
+            pressure_threshold,
+            "1-minute sell pressure exceeded the configured threshold.",
+            col("sell_pressure") >= pressure_threshold + lit(15),
+        ),
+        alert_candidate(
+            col("quote_volume") >= volume_threshold,
+            "HIGH_VOLUME",
+            "quote_volume_usdt",
+            col("quote_volume"),
+            volume_threshold,
+            "1-minute quote volume exceeded the configured threshold.",
+            col("quote_volume") >= volume_threshold * lit(2),
+        ),
+    )
+
+    return (
+        candles_df.select(
+            "symbol",
+            col("window_end").alias("event_time"),
+            "interval",
+            explode(candidates).alias("alert"),
+        )
+        .filter(col("alert").isNotNull())
+        .select(
+            "symbol",
+            col("alert.alert_type").alias("alert_type"),
+            col("alert.severity").alias("severity"),
+            "event_time",
+            "interval",
+            col("alert.metric_name").alias("metric_name"),
+            col("alert.metric_value").alias("metric_value"),
+            col("alert.threshold_value").alias("threshold_value"),
+            col("alert.message").alias("message"),
+        )
+    )
+
+
+def format_market_alert_records(alerts_df: DataFrame) -> DataFrame:
+    return alerts_df.select(
+        concat_ws(
+            "|",
+            "symbol",
+            "alert_type",
+            date_format("event_time", "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"),
+        ).alias("key"),
+        to_json(
+            struct(
+                "symbol",
+                "alert_type",
+                "severity",
+                "event_time",
+                "interval",
+                "metric_name",
+                "metric_value",
+                "threshold_value",
+                "message",
+            )
+        ).alias("value"),
     )
 
 

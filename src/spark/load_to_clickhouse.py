@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 import sys
 from collections.abc import Iterator
@@ -21,6 +19,8 @@ from src.spark.transformation import (
     aggregate_quote_snapshots,
     deduplicate_agg_trades,
     format_dead_letter_records,
+    format_market_alert_records,
+    generate_market_alerts,
     transform_agg_trades,
     transform_book_tickers,
 )
@@ -88,6 +88,18 @@ QUOTE_SNAPSHOTS_COLUMNS = (
     "kafka_offset",
     "kafka_timestamp",
     "processed_at",
+)
+MARKET_ALERTS_TABLE = "fact_market_alerts"
+MARKET_ALERTS_COLUMNS = (
+    "symbol",
+    "alert_type",
+    "severity",
+    "event_time",
+    "interval",
+    "metric_name",
+    "metric_value",
+    "threshold_value",
+    "message",
 )
 CLICKHOUSE_INSERT_BATCH_SIZE = 5_000
 
@@ -177,13 +189,26 @@ def _write_quote_snapshots_batch(batch_df: DataFrame, batch_id: int) -> None:
     )
 
 
-def _read_kafka_stream(spark: SparkSession, topic: str) -> DataFrame:
+def _write_market_alerts_batch(batch_df: DataFrame, batch_id: int) -> None:
+    _write_table_batch(
+        batch_df,
+        batch_id,
+        MARKET_ALERTS_TABLE,
+        MARKET_ALERTS_COLUMNS,
+    )
+
+
+def _read_kafka_stream(
+    spark: SparkSession,
+    topic: str,
+    starting_offsets: str = "earliest",
+) -> DataFrame:
     return (
         spark.readStream
         .format("kafka")
         .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
         .option("subscribe", topic)
-        .option("startingOffsets", "earliest")
+        .option("startingOffsets", starting_offsets)
         .option("failOnDataLoss", "true")
         .load()
     )
@@ -220,6 +245,57 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
             "checkpointLocation",
             _checkpoint_location("agg_market_candles_1m_to_clickhouse"),
         )
+        .trigger(processingTime="10 seconds")
+        .start()
+    )
+
+    alert_agg_trades_kafka_df = _read_kafka_stream(
+        spark,
+        settings.KAFKA_AGG_TRADES_TOPIC,
+        starting_offsets="latest",
+    )
+    alert_valid_df, _ = transform_agg_trades(alert_agg_trades_kafka_df)
+    completed_candles_df = aggregate_market_candles(
+        alert_valid_df,
+        watermark_delay=(
+            f"{settings.ALERT_CANDLE_WATERMARK_SECONDS} seconds"
+        ),
+    )
+    market_alerts_df = generate_market_alerts(
+        completed_candles_df,
+        volatility_threshold_percent=(
+            settings.ALERT_VOLATILITY_THRESHOLD_PERCENT
+        ),
+        pressure_threshold_percent=settings.ALERT_PRESSURE_THRESHOLD_PERCENT,
+        quote_volume_threshold_usdt=(
+            settings.ALERT_QUOTE_VOLUME_THRESHOLD_USDT
+        ),
+    )
+    market_alerts_clickhouse_query = (
+        market_alerts_df.writeStream
+        .queryName("market_alerts_to_clickhouse")
+        .outputMode("append")
+        .foreachBatch(_write_market_alerts_batch)
+        .option(
+            "checkpointLocation",
+            _checkpoint_location("market_alerts_to_clickhouse"),
+        )
+        .trigger(processingTime="10 seconds")
+        .start()
+    )
+
+    market_alerts_kafka_query = (
+        format_market_alert_records(market_alerts_df)
+        .writeStream
+        .queryName("market_alerts_to_kafka")
+        .format("kafka")
+        .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
+        .option("topic", settings.KAFKA_ALERTS_TOPIC)
+        .option(
+            "checkpointLocation",
+            _checkpoint_location("market_alerts_to_kafka"),
+        )
+        .outputMode("append")
         .trigger(processingTime="10 seconds")
         .start()
     )
@@ -294,6 +370,8 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
     return [
         clickhouse_query,
         market_candles_query,
+        market_alerts_clickhouse_query,
+        market_alerts_kafka_query,
         dead_letter_query,
         quote_snapshots_query,
         invalid_book_ticker_query,
@@ -308,12 +386,13 @@ def run() -> None:
         queries = _start_queries(spark)
         logger.info(
             "Spark is consuming %s and %s; writing trades to %s, "
-            "1-minute candles to %s, and quote snapshots to %s",
+            "1-minute candles to %s, quote snapshots to %s, and alerts to %s",
             settings.KAFKA_AGG_TRADES_TOPIC,
             settings.KAFKA_BOOK_TICKER_TOPIC,
             AGG_TRADES_TABLE,
             CANDLES_TABLE,
             QUOTE_SNAPSHOTS_TABLE,
+            MARKET_ALERTS_TABLE,
         )
         spark.streams.awaitAnyTermination()
     finally:
