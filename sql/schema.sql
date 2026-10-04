@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS crypto_market.agg_market_candles
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(window_start)
 ORDER BY (symbol, interval, window_start)
-TTL window_start + INTERVAL 12 MONTH DELETE
+TTL window_start + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192;
 
 
@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS crypto_market.fact_market_alerts
 ENGINE = ReplacingMergeTree(created_at)
 PARTITION BY toYYYYMM(event_time)
 ORDER BY (symbol, event_time, alert_type, alert_id)
-TTL event_time + INTERVAL 90 DAY DELETE
+TTL event_time + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192;
 
 
