@@ -15,10 +15,10 @@ ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (exchange, market_type, symbol);
 
 
--- 2. Normalized aggregate trades from the Binance aggTrade stream.
+-- 2. Normalized Spot trades from every supported exchange.
 CREATE TABLE IF NOT EXISTS crypto_market.fact_agg_trades
 (
-    schema_version UInt16 DEFAULT 1,
+    schema_version UInt16 DEFAULT 2,
     exchange LowCardinality(String) DEFAULT 'binance',
     market_type LowCardinality(String) DEFAULT 'spot',
     symbol LowCardinality(String),
@@ -39,12 +39,12 @@ CREATE TABLE IF NOT EXISTS crypto_market.fact_agg_trades
 )
 ENGINE = ReplacingMergeTree(processed_at)
 PARTITION BY toDate(trade_time)
-ORDER BY (symbol, trade_time, agg_trade_id)
+ORDER BY (exchange, market_type, symbol, trade_time, agg_trade_id)
 TTL trade_time + INTERVAL 3 DAY DELETE
 SETTINGS index_granularity = 8192;
 
 
--- 3. Throttled best bid/ask snapshots from the Binance bookTicker stream.
+-- 3. Throttled best bid/ask snapshots from every supported exchange.
 CREATE TABLE IF NOT EXISTS crypto_market.fact_quote_snapshots
 (
     exchange LowCardinality(String) DEFAULT 'binance',
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS crypto_market.fact_quote_snapshots
 )
 ENGINE = ReplacingMergeTree(processed_at)
 PARTITION BY toDate(snapshot_time)
-ORDER BY (symbol, snapshot_time, update_id)
+ORDER BY (exchange, market_type, symbol, snapshot_time, update_id)
 TTL snapshot_time + INTERVAL 3 DAY DELETE
 SETTINGS index_granularity = 8192;
 
@@ -74,6 +74,8 @@ SETTINGS index_granularity = 8192;
 -- 4. OHLCV and market metrics calculated for each time window.
 CREATE TABLE IF NOT EXISTS crypto_market.agg_market_candles
 (
+    exchange LowCardinality(String) DEFAULT 'binance',
+    market_type LowCardinality(String) DEFAULT 'spot',
     symbol LowCardinality(String),
     interval LowCardinality(String),
     window_start DateTime64(3, 'UTC'),
@@ -95,13 +97,13 @@ CREATE TABLE IF NOT EXISTS crypto_market.agg_market_candles
 )
 ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(window_start)
-ORDER BY (symbol, interval, window_start)
+ORDER BY (exchange, market_type, symbol, interval, window_start)
 TTL window_start + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192;
 
 
 -- Latest version of each market candle for BI and analytics queries.
-CREATE VIEW IF NOT EXISTS crypto_market.agg_market_candles_latest AS
+CREATE OR REPLACE VIEW crypto_market.agg_market_candles_latest AS
 SELECT *
 FROM crypto_market.agg_market_candles FINAL;
 
@@ -110,6 +112,8 @@ FROM crypto_market.agg_market_candles FINAL;
 CREATE TABLE IF NOT EXISTS crypto_market.fact_market_alerts
 (
     alert_id UUID DEFAULT generateUUIDv4(),
+    exchange LowCardinality(String) DEFAULT 'binance',
+    market_type LowCardinality(String) DEFAULT 'spot',
     symbol LowCardinality(String),
     alert_type LowCardinality(String),
     severity LowCardinality(String),
@@ -123,7 +127,7 @@ CREATE TABLE IF NOT EXISTS crypto_market.fact_market_alerts
 )
 ENGINE = ReplacingMergeTree(created_at)
 PARTITION BY toYYYYMM(event_time)
-ORDER BY (symbol, event_time, alert_type, alert_id)
+ORDER BY (exchange, market_type, symbol, event_time, alert_type, alert_id)
 TTL event_time + INTERVAL 7 DAY DELETE
 SETTINGS index_granularity = 8192;
 

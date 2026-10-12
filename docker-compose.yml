@@ -137,6 +137,42 @@ services:
     networks:
       - crypto_network
 
+  bybit-producer:
+    image: realtime-crypto-driver:3.4.1
+    pull_policy: never
+    container_name: crypto-bybit-producer
+    command:
+      - python3
+      - -m
+      - src.kafka.bybit_producer
+    volumes:
+      - ./:/opt/spark/work-dir
+    working_dir: /opt/spark/work-dir
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - crypto_network
+
+  okx-producer:
+    image: realtime-crypto-driver:3.4.1
+    pull_policy: never
+    container_name: crypto-okx-producer
+    command:
+      - python3
+      - -m
+      - src.kafka.okx_producer
+    volumes:
+      - ./:/opt/spark/work-dir
+    working_dir: /opt/spark/work-dir
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - crypto_network
+
   clickhouse:
     image: clickhouse/clickhouse-server:26.8.6.5
     container_name: crypto-clickhouse

@@ -24,13 +24,13 @@ def _topic_definitions() -> list[NewTopic]:
 
     return [
         NewTopic(
-            topic=settings.KAFKA_AGG_TRADES_TOPIC,
+            topic=settings.KAFKA_SPOT_TRADES_TOPIC,
             num_partitions=settings.KAFKA_NUM_PARTITIONS,
             replication_factor=settings.KAFKA_REPLICATION_FACTOR,
             config=topic_config,
         ),
         NewTopic(
-            topic=settings.KAFKA_BOOK_TICKER_TOPIC,
+            topic=settings.KAFKA_SPOT_QUOTES_TOPIC,
             num_partitions=settings.KAFKA_NUM_PARTITIONS,
             replication_factor=settings.KAFKA_REPLICATION_FACTOR,
             config=book_ticker_topic_config,

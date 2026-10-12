@@ -1,76 +1,16 @@
 import asyncio
 import json
 import logging
-from collections.abc import Sequence
+import time
+from collections.abc import Mapping, Sequence
 
-from confluent_kafka import KafkaError, Message, Producer
 from websockets.asyncio.client import connect
 
 from configs.settings import settings
+from src.kafka.market_data import MarketDataPublisher
 
 
 logger = logging.getLogger(__name__)
-
-
-class BinanceProducer:
-    def __init__(self) -> None:
-        self._producer = Producer(
-            {
-                "bootstrap.servers": settings.KAFKA_BOOTSTRAP_SERVERS,
-                "client.id": "binance-market-data-producer",
-                "acks": "all",
-                "enable.idempotence": True,
-                "compression.type": "gzip",
-                "linger.ms": 20,
-                "message.timeout.ms": 30_000,
-            }
-        )
-
-    @staticmethod
-    def _delivery_report(error: KafkaError | None, message: Message) -> None:
-        if error is not None:
-            logger.error(
-                "Failed to deliver message to Kafka topic %s: %s",
-                message.topic(),
-                error,
-            )
-
-    async def publish(
-        self,
-        topic: str,
-        event_type: str,
-        symbol: str,
-        payload: str | bytes,
-    ) -> None:
-        while True:
-            try:
-                self._producer.produce(
-                    topic=topic,
-                    key=symbol,
-                    value=payload,
-                    headers={
-                        "source": "binance",
-                        "event_type": event_type,
-                        "schema_version": "1",
-                    },
-                    on_delivery=self._delivery_report,
-                )
-                self._producer.poll(0)
-                return
-            except BufferError:
-                logger.warning("Kafka producer queue is full; waiting for delivery.")
-                self._producer.poll(0)
-                await asyncio.sleep(0.1)
-
-    def close(self) -> None:
-        remaining_messages = self._producer.flush(timeout=10)
-        if remaining_messages:
-            logger.warning(
-                "%d Kafka message(s) were not delivered before shutdown.",
-                remaining_messages,
-            )
-        else:
-            logger.info("Kafka producer stopped after delivering all queued messages.")
 
 
 def _subscription_streams(symbols: Sequence[str]) -> tuple[str, ...]:
@@ -84,7 +24,44 @@ def _subscription_streams(symbols: Sequence[str]) -> tuple[str, ...]:
     )
 
 
-def _route_payload(payload: str | bytes) -> tuple[str, str, str] | None:
+def _normalized_trade(event: Mapping[str, object]) -> dict[str, object]:
+    symbol = str(event["s"]).upper()
+    buyer_is_market_maker = bool(event["m"])
+    return {
+        "event_type": "trade",
+        "exchange": "binance",
+        "market_type": "spot",
+        "symbol": symbol,
+        "trade_id": event["a"],
+        "event_time": event["E"],
+        "trade_time": event["T"],
+        "price": event["p"],
+        "quantity": event["q"],
+        "taker_side": "SELL" if buyer_is_market_maker else "BUY",
+        "buyer_is_market_maker": buyer_is_market_maker,
+        "first_trade_id": event["f"],
+        "last_trade_id": event["l"],
+    }
+
+
+def _normalized_quote(event: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "event_type": "quote",
+        "exchange": "binance",
+        "market_type": "spot",
+        "symbol": str(event["s"]).upper(),
+        "update_id": event["u"],
+        "snapshot_time": event.get("E") or event.get("T") or int(time.time() * 1000),
+        "best_bid_price": event["b"],
+        "best_bid_quantity": event["B"],
+        "best_ask_price": event["a"],
+        "best_ask_quantity": event["A"],
+    }
+
+
+def _route_payload(
+    payload: str | bytes,
+) -> tuple[str, str, str, dict[str, object]] | None:
     try:
         event = json.loads(payload)
     except (json.JSONDecodeError, TypeError):
@@ -97,21 +74,22 @@ def _route_payload(payload: str | bytes) -> tuple[str, str, str] | None:
 
     symbol = str(event.get("s", "")).strip().upper()
     if not symbol:
-        # Subscription acknowledgements do not contain a symbol.
         return None
 
     if event.get("e") == "aggTrade":
         return (
-            settings.KAFKA_AGG_TRADES_TOPIC,
-            settings.BINANCE_AGG_TRADES_STREAM,
+            settings.KAFKA_SPOT_TRADES_TOPIC,
+            "trade",
             symbol,
+            _normalized_trade(event),
         )
 
     if all(field in event for field in ("u", "b", "B", "a", "A")):
         return (
-            settings.KAFKA_BOOK_TICKER_TOPIC,
-            settings.BINANCE_BOOK_TICKER_STREAM,
+            settings.KAFKA_SPOT_QUOTES_TOPIC,
+            "quote",
             symbol,
+            _normalized_quote(event),
         )
 
     logger.debug("Ignoring unsupported Binance event for %s.", symbol)
@@ -120,16 +98,12 @@ def _route_payload(payload: str | bytes) -> tuple[str, str, str] | None:
 
 async def _stream_market_data(
     symbols: Sequence[str],
-    producer: BinanceProducer,
+    publisher: MarketDataPublisher,
 ) -> None:
     reconnect_delay = 1
     streams = _subscription_streams(symbols)
     subscription = json.dumps(
-        {
-            "method": "SUBSCRIBE",
-            "params": list(streams),
-            "id": 1,
-        }
+        {"method": "SUBSCRIBE", "params": list(streams), "id": 1}
     )
 
     while True:
@@ -146,10 +120,7 @@ async def _stream_market_data(
                 max_queue=1_000,
             ) as websocket:
                 await websocket.send(subscription)
-                logger.info(
-                    "Subscribed to Binance streams: %s",
-                    ", ".join(streams),
-                )
+                logger.info("Subscribed to Binance streams: %s", ", ".join(streams))
                 reconnect_delay = 1
 
                 async for payload in websocket:
@@ -157,12 +128,12 @@ async def _stream_market_data(
                     if route is None:
                         continue
 
-                    topic, event_type, symbol = route
-                    await producer.publish(
+                    topic, event_type, symbol, normalized_payload = route
+                    await publisher.publish(
                         topic,
                         event_type,
                         symbol,
-                        payload,
+                        normalized_payload,
                     )
         except asyncio.CancelledError:
             raise
@@ -181,18 +152,18 @@ async def run(symbols: Sequence[str] | None = None) -> None:
     if not selected_symbols:
         raise ValueError("BINANCE_SYMBOLS must contain at least one symbol.")
 
-    producer = BinanceProducer()
+    publisher = MarketDataPublisher("binance")
     logger.info(
-        "Starting Binance producer for %s; Kafka topics: %s, %s",
+        "Starting Binance Spot producer for %s; Kafka topics: %s, %s",
         ", ".join(selected_symbols),
-        settings.KAFKA_AGG_TRADES_TOPIC,
-        settings.KAFKA_BOOK_TICKER_TOPIC,
+        settings.KAFKA_SPOT_TRADES_TOPIC,
+        settings.KAFKA_SPOT_QUOTES_TOPIC,
     )
 
     try:
-        await _stream_market_data(selected_symbols, producer)
+        await _stream_market_data(selected_symbols, publisher)
     finally:
-        producer.close()
+        publisher.close()
 
 
 def main() -> None:

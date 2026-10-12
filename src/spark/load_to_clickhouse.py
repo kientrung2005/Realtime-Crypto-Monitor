@@ -51,6 +51,8 @@ AGG_TRADES_COLUMNS = (
 )
 CANDLES_TABLE = "agg_market_candles"
 CANDLES_COLUMNS = (
+    "exchange",
+    "market_type",
     "symbol",
     "interval",
     "window_start",
@@ -91,6 +93,8 @@ QUOTE_SNAPSHOTS_COLUMNS = (
 )
 MARKET_ALERTS_TABLE = "fact_market_alerts"
 MARKET_ALERTS_COLUMNS = (
+    "exchange",
+    "market_type",
     "symbol",
     "alert_type",
     "severity",
@@ -217,19 +221,19 @@ def _read_kafka_stream(
 def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
     agg_trades_kafka_df = _read_kafka_stream(
         spark,
-        settings.KAFKA_AGG_TRADES_TOPIC,
+        settings.KAFKA_SPOT_TRADES_TOPIC,
     )
     valid_df, invalid_df = transform_agg_trades(agg_trades_kafka_df)
     deduplicated_valid_df = deduplicate_agg_trades(valid_df)
 
     clickhouse_query = (
         deduplicated_valid_df.writeStream
-        .queryName("agg_trades_to_clickhouse")
+        .queryName("spot_trades_to_clickhouse_v2")
         .outputMode("append")
         .foreachBatch(_write_agg_trades_batch)
         .option(
             "checkpointLocation",
-            _checkpoint_location("agg_trades_to_clickhouse"),
+            _checkpoint_location("spot_trades_to_clickhouse_v2"),
         )
         .trigger(processingTime="10 seconds")
         .start()
@@ -238,12 +242,12 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
     market_candles_df = aggregate_market_candles(valid_df)
     market_candles_query = (
         market_candles_df.writeStream
-        .queryName("agg_market_candles_1m_to_clickhouse")
+        .queryName("spot_market_candles_1m_to_clickhouse_v2")
         .outputMode("update")
         .foreachBatch(_write_market_candles_batch)
         .option(
             "checkpointLocation",
-            _checkpoint_location("agg_market_candles_1m_to_clickhouse"),
+            _checkpoint_location("spot_market_candles_1m_to_clickhouse_v2"),
         )
         .trigger(processingTime="10 seconds")
         .start()
@@ -251,7 +255,7 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
 
     alert_agg_trades_kafka_df = _read_kafka_stream(
         spark,
-        settings.KAFKA_AGG_TRADES_TOPIC,
+        settings.KAFKA_SPOT_TRADES_TOPIC,
         starting_offsets="latest",
     )
     alert_valid_df, _ = transform_agg_trades(alert_agg_trades_kafka_df)
@@ -273,12 +277,12 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
     )
     market_alerts_clickhouse_query = (
         market_alerts_df.writeStream
-        .queryName("market_alerts_to_clickhouse")
+        .queryName("spot_market_alerts_to_clickhouse_v2")
         .outputMode("append")
         .foreachBatch(_write_market_alerts_batch)
         .option(
             "checkpointLocation",
-            _checkpoint_location("market_alerts_to_clickhouse"),
+            _checkpoint_location("spot_market_alerts_to_clickhouse_v2"),
         )
         .trigger(processingTime="10 seconds")
         .start()
@@ -287,13 +291,13 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
     market_alerts_kafka_query = (
         format_market_alert_records(market_alerts_df)
         .writeStream
-        .queryName("market_alerts_to_kafka")
+        .queryName("spot_market_alerts_to_kafka_v2")
         .format("kafka")
         .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
         .option("topic", settings.KAFKA_ALERTS_TOPIC)
         .option(
             "checkpointLocation",
-            _checkpoint_location("market_alerts_to_kafka"),
+            _checkpoint_location("spot_market_alerts_to_kafka_v2"),
         )
         .outputMode("append")
         .trigger(processingTime="10 seconds")
@@ -302,17 +306,17 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
 
     dead_letter_df = format_dead_letter_records(
         invalid_df,
-        settings.KAFKA_AGG_TRADES_TOPIC,
+        settings.KAFKA_SPOT_TRADES_TOPIC,
     )
     dead_letter_query = (
         dead_letter_df.writeStream
-        .queryName("invalid_agg_trades_to_dlq")
+        .queryName("invalid_spot_trades_to_dlq_v2")
         .format("kafka")
         .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
         .option("topic", settings.KAFKA_DEAD_LETTER_TOPIC)
         .option(
             "checkpointLocation",
-            _checkpoint_location("invalid_agg_trades_to_dlq"),
+            _checkpoint_location("invalid_spot_trades_to_dlq_v2"),
         )
         .outputMode("append")
         .trigger(processingTime="10 seconds")
@@ -321,7 +325,7 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
 
     book_ticker_kafka_df = _read_kafka_stream(
         spark,
-        settings.KAFKA_BOOK_TICKER_TOPIC,
+        settings.KAFKA_SPOT_QUOTES_TOPIC,
     )
     valid_book_ticker_df, invalid_book_ticker_df = transform_book_tickers(
         book_ticker_kafka_df
@@ -337,12 +341,12 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
     )
     quote_snapshots_query = (
         quote_snapshots_df.writeStream
-        .queryName("quote_snapshots_to_clickhouse")
+        .queryName("spot_quote_snapshots_to_clickhouse_v2")
         .outputMode("append")
         .foreachBatch(_write_quote_snapshots_batch)
         .option(
             "checkpointLocation",
-            _checkpoint_location("quote_snapshots_to_clickhouse"),
+            _checkpoint_location("spot_quote_snapshots_to_clickhouse_v2"),
         )
         .trigger(processingTime="10 seconds")
         .start()
@@ -350,17 +354,17 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
 
     invalid_book_ticker_dead_letter_df = format_dead_letter_records(
         invalid_book_ticker_df,
-        settings.KAFKA_BOOK_TICKER_TOPIC,
+        settings.KAFKA_SPOT_QUOTES_TOPIC,
     )
     invalid_book_ticker_query = (
         invalid_book_ticker_dead_letter_df.writeStream
-        .queryName("invalid_book_tickers_to_dlq")
+        .queryName("invalid_spot_quotes_to_dlq_v2")
         .format("kafka")
         .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
         .option("topic", settings.KAFKA_DEAD_LETTER_TOPIC)
         .option(
             "checkpointLocation",
-            _checkpoint_location("invalid_book_tickers_to_dlq"),
+            _checkpoint_location("invalid_spot_quotes_to_dlq_v2"),
         )
         .outputMode("append")
         .trigger(processingTime="10 seconds")
@@ -387,8 +391,8 @@ def run() -> None:
         logger.info(
             "Spark is consuming %s and %s; writing trades to %s, "
             "1-minute candles to %s, quote snapshots to %s, and alerts to %s",
-            settings.KAFKA_AGG_TRADES_TOPIC,
-            settings.KAFKA_BOOK_TICKER_TOPIC,
+            settings.KAFKA_SPOT_TRADES_TOPIC,
+            settings.KAFKA_SPOT_QUOTES_TOPIC,
             AGG_TRADES_TABLE,
             CANDLES_TABLE,
             QUOTE_SNAPSHOTS_TABLE,

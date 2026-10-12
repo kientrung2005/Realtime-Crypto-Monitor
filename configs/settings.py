@@ -16,8 +16,8 @@ def _get_float(name: str, default: float) -> float:
     return float(os.getenv(name, str(default)))
 
 
-def _get_symbols() -> tuple[str, ...]:
-    raw_symbols = os.getenv("BINANCE_SYMBOLS", "btcusdt,ethusdt,solusdt")
+def _get_symbols(name: str, default: str) -> tuple[str, ...]:
+    raw_symbols = os.getenv(name, default)
     return tuple(
         symbol.strip().upper()
         for symbol in raw_symbols.split(",")
@@ -32,7 +32,9 @@ class Settings:
         "BINANCE_WEBSOCKET_URL",
         "wss://stream.binance.com:9443/ws",
     )
-    BINANCE_SYMBOLS: tuple[str, ...] = _get_symbols()
+    BINANCE_SYMBOLS: tuple[str, ...] = _get_symbols(
+        "BINANCE_SYMBOLS", "btcusdt,ethusdt,solusdt"
+    )
     BINANCE_AGG_TRADES_STREAM: str = os.getenv(
         "BINANCE_AGG_TRADES_STREAM",
         os.getenv("BINANCE_STREAM", "aggTrade"),
@@ -40,6 +42,22 @@ class Settings:
     BINANCE_BOOK_TICKER_STREAM: str = os.getenv(
         "BINANCE_BOOK_TICKER_STREAM",
         "bookTicker",
+    )
+
+    BYBIT_WEBSOCKET_URL: str = os.getenv(
+        "BYBIT_WEBSOCKET_URL",
+        "wss://stream.bybit.com/v5/public/spot",
+    )
+    BYBIT_SYMBOLS: tuple[str, ...] = _get_symbols(
+        "BYBIT_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT"
+    )
+
+    OKX_WEBSOCKET_URL: str = os.getenv(
+        "OKX_WEBSOCKET_URL",
+        "wss://ws.okx.com:8443/ws/v5/public",
+    )
+    OKX_SYMBOLS: tuple[str, ...] = _get_symbols(
+        "OKX_SYMBOLS", "BTC-USDT,ETH-USDT,SOL-USDT"
     )
 
     KAFKA_BOOTSTRAP_SERVERS_HOST: str = os.getenv(
@@ -62,21 +80,21 @@ class Settings:
         "KAFKA_BOOK_TICKER_RETENTION_HOURS",
         6,
     )
-    KAFKA_AGG_TRADES_TOPIC: str = os.getenv(
-        "KAFKA_AGG_TRADES_TOPIC",
-        "binance.spot.agg-trades.v1",
+    KAFKA_SPOT_TRADES_TOPIC: str = os.getenv(
+        "KAFKA_SPOT_TRADES_TOPIC",
+        "crypto.spot.trades.v1",
     )
-    KAFKA_BOOK_TICKER_TOPIC: str = os.getenv(
-        "KAFKA_BOOK_TICKER_TOPIC",
-        "binance.spot.book-ticker.v1",
+    KAFKA_SPOT_QUOTES_TOPIC: str = os.getenv(
+        "KAFKA_SPOT_QUOTES_TOPIC",
+        "crypto.spot.quotes.v1",
     )
     KAFKA_ALERTS_TOPIC: str = os.getenv(
         "KAFKA_ALERTS_TOPIC",
-        "binance.market-alerts.v1",
+        "crypto.market-alerts.v1",
     )
     KAFKA_DEAD_LETTER_TOPIC: str = os.getenv(
         "KAFKA_DEAD_LETTER_TOPIC",
-        "binance.dead-letter.v1",
+        "crypto.dead-letter.v1",
     )
     QUOTE_SNAPSHOT_INTERVAL_SECONDS: int = _get_int(
         "QUOTE_SNAPSHOT_INTERVAL_SECONDS",
