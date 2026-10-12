@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from pyspark.sql import DataFrame, Row, SparkSession
+from pyspark.sql.functions import col, lit
 from pyspark.sql.streaming import StreamingQuery
 
 
@@ -106,6 +107,8 @@ MARKET_ALERTS_COLUMNS = (
     "message",
 )
 CLICKHOUSE_INSERT_BATCH_SIZE = 5_000
+CLICKHOUSE_RECORD = "clickhouse"
+DEAD_LETTER_RECORD = "dead_letter"
 
 
 def _checkpoint_location(query_name: str) -> str:
@@ -166,30 +169,12 @@ def _write_table_batch(
     )
 
 
-def _write_agg_trades_batch(batch_df: DataFrame, batch_id: int) -> None:
-    _write_table_batch(
-        batch_df,
-        batch_id,
-        AGG_TRADES_TABLE,
-        AGG_TRADES_COLUMNS,
-    )
-
-
 def _write_market_candles_batch(batch_df: DataFrame, batch_id: int) -> None:
     _write_table_batch(
         batch_df,
         batch_id,
         CANDLES_TABLE,
         CANDLES_COLUMNS,
-    )
-
-
-def _write_quote_snapshots_batch(batch_df: DataFrame, batch_id: int) -> None:
-    _write_table_batch(
-        batch_df,
-        batch_id,
-        QUOTE_SNAPSHOTS_TABLE,
-        QUOTE_SNAPSHOTS_COLUMNS,
     )
 
 
@@ -200,6 +185,114 @@ def _write_market_alerts_batch(batch_df: DataFrame, batch_id: int) -> None:
         MARKET_ALERTS_TABLE,
         MARKET_ALERTS_COLUMNS,
     )
+
+
+def _write_kafka_batch(
+    batch_df: DataFrame,
+    batch_id: int,
+    topic: str,
+) -> None:
+    if batch_df.isEmpty():
+        logger.info(
+            "Spark batch %d has no row(s) for Kafka topic %s",
+            batch_id,
+            topic,
+        )
+        return
+
+    (
+        batch_df.select(
+            col("key").cast("string").alias("key"),
+            col("value").cast("string").alias("value"),
+        )
+        .write
+        .format("kafka")
+        .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
+        .option("topic", topic)
+        .mode("append")
+        .save()
+    )
+    logger.info(
+        "Spark batch %d wrote row(s) to Kafka topic %s",
+        batch_id,
+        topic,
+    )
+
+
+def _combine_clickhouse_and_dead_letter_records(
+    valid_df: DataFrame,
+    invalid_df: DataFrame,
+    columns: tuple[str, ...],
+    source_topic: str,
+) -> DataFrame:
+    clickhouse_df = (
+        valid_df.select(*columns)
+        .withColumn("_record_target", lit(CLICKHOUSE_RECORD))
+        .withColumn("key", lit(None).cast("string"))
+        .withColumn("value", lit(None).cast("string"))
+    )
+    dead_letter_df = (
+        format_dead_letter_records(invalid_df, source_topic)
+        .withColumn("_record_target", lit(DEAD_LETTER_RECORD))
+    )
+    return clickhouse_df.unionByName(dead_letter_df, allowMissingColumns=True)
+
+
+def _write_clickhouse_and_dead_letter_batch(
+    batch_df: DataFrame,
+    batch_id: int,
+    table: str,
+    columns: tuple[str, ...],
+) -> None:
+    batch_df.persist()
+    try:
+        _write_table_batch(
+            batch_df.filter(col("_record_target") == CLICKHOUSE_RECORD),
+            batch_id,
+            table,
+            columns,
+        )
+        _write_kafka_batch(
+            batch_df.filter(col("_record_target") == DEAD_LETTER_RECORD),
+            batch_id,
+            settings.KAFKA_DEAD_LETTER_TOPIC,
+        )
+    finally:
+        batch_df.unpersist()
+
+
+def _write_trade_outputs_batch(batch_df: DataFrame, batch_id: int) -> None:
+    _write_clickhouse_and_dead_letter_batch(
+        batch_df,
+        batch_id,
+        AGG_TRADES_TABLE,
+        AGG_TRADES_COLUMNS,
+    )
+
+
+def _write_quote_outputs_batch(batch_df: DataFrame, batch_id: int) -> None:
+    _write_clickhouse_and_dead_letter_batch(
+        batch_df,
+        batch_id,
+        QUOTE_SNAPSHOTS_TABLE,
+        QUOTE_SNAPSHOTS_COLUMNS,
+    )
+
+
+def _write_market_alert_outputs_batch(
+    batch_df: DataFrame,
+    batch_id: int,
+) -> None:
+    batch_df.persist()
+    try:
+        _write_market_alerts_batch(batch_df, batch_id)
+        _write_kafka_batch(
+            format_market_alert_records(batch_df),
+            batch_id,
+            settings.KAFKA_ALERTS_TOPIC,
+        )
+    finally:
+        batch_df.unpersist()
 
 
 def _read_kafka_stream(
@@ -213,6 +306,10 @@ def _read_kafka_stream(
         .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
         .option("subscribe", topic)
         .option("startingOffsets", starting_offsets)
+        .option(
+            "maxOffsetsPerTrigger",
+            str(settings.SPARK_MAX_OFFSETS_PER_TRIGGER),
+        )
         .option("failOnDataLoss", "true")
         .load()
     )
@@ -225,15 +322,21 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
     )
     valid_df, invalid_df = transform_agg_trades(agg_trades_kafka_df)
     deduplicated_valid_df = deduplicate_agg_trades(valid_df)
+    trade_outputs_df = _combine_clickhouse_and_dead_letter_records(
+        deduplicated_valid_df,
+        invalid_df,
+        AGG_TRADES_COLUMNS,
+        settings.KAFKA_SPOT_TRADES_TOPIC,
+    )
 
-    clickhouse_query = (
-        deduplicated_valid_df.writeStream
-        .queryName("spot_trades_to_clickhouse_v2")
+    trade_outputs_query = (
+        trade_outputs_df.writeStream
+        .queryName("spot_trade_outputs_v3")
         .outputMode("append")
-        .foreachBatch(_write_agg_trades_batch)
+        .foreachBatch(_write_trade_outputs_batch)
         .option(
             "checkpointLocation",
-            _checkpoint_location("spot_trades_to_clickhouse_v2"),
+            _checkpoint_location("spot_trade_outputs_v3"),
         )
         .trigger(processingTime="10 seconds")
         .start()
@@ -242,12 +345,12 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
     market_candles_df = aggregate_market_candles(valid_df)
     market_candles_query = (
         market_candles_df.writeStream
-        .queryName("spot_market_candles_1m_to_clickhouse_v2")
+        .queryName("spot_market_candles_1m_to_clickhouse_v3")
         .outputMode("update")
         .foreachBatch(_write_market_candles_batch)
         .option(
             "checkpointLocation",
-            _checkpoint_location("spot_market_candles_1m_to_clickhouse_v2"),
+            _checkpoint_location("spot_market_candles_1m_to_clickhouse_v3"),
         )
         .trigger(processingTime="10 seconds")
         .start()
@@ -275,50 +378,15 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
             settings.ALERT_QUOTE_VOLUME_THRESHOLD_USDT
         ),
     )
-    market_alerts_clickhouse_query = (
+    market_alerts_outputs_query = (
         market_alerts_df.writeStream
-        .queryName("spot_market_alerts_to_clickhouse_v2")
+        .queryName("spot_market_alert_outputs_v3")
         .outputMode("append")
-        .foreachBatch(_write_market_alerts_batch)
+        .foreachBatch(_write_market_alert_outputs_batch)
         .option(
             "checkpointLocation",
-            _checkpoint_location("spot_market_alerts_to_clickhouse_v2"),
+            _checkpoint_location("spot_market_alert_outputs_v3"),
         )
-        .trigger(processingTime="10 seconds")
-        .start()
-    )
-
-    market_alerts_kafka_query = (
-        format_market_alert_records(market_alerts_df)
-        .writeStream
-        .queryName("spot_market_alerts_to_kafka_v2")
-        .format("kafka")
-        .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
-        .option("topic", settings.KAFKA_ALERTS_TOPIC)
-        .option(
-            "checkpointLocation",
-            _checkpoint_location("spot_market_alerts_to_kafka_v2"),
-        )
-        .outputMode("append")
-        .trigger(processingTime="10 seconds")
-        .start()
-    )
-
-    dead_letter_df = format_dead_letter_records(
-        invalid_df,
-        settings.KAFKA_SPOT_TRADES_TOPIC,
-    )
-    dead_letter_query = (
-        dead_letter_df.writeStream
-        .queryName("invalid_spot_trades_to_dlq_v2")
-        .format("kafka")
-        .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
-        .option("topic", settings.KAFKA_DEAD_LETTER_TOPIC)
-        .option(
-            "checkpointLocation",
-            _checkpoint_location("invalid_spot_trades_to_dlq_v2"),
-        )
-        .outputMode("append")
         .trigger(processingTime="10 seconds")
         .start()
     )
@@ -339,46 +407,30 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
             f"{settings.QUOTE_SNAPSHOT_WATERMARK_SECONDS} seconds"
         ),
     )
-    quote_snapshots_query = (
-        quote_snapshots_df.writeStream
-        .queryName("spot_quote_snapshots_to_clickhouse_v2")
-        .outputMode("append")
-        .foreachBatch(_write_quote_snapshots_batch)
-        .option(
-            "checkpointLocation",
-            _checkpoint_location("spot_quote_snapshots_to_clickhouse_v2"),
-        )
-        .trigger(processingTime="10 seconds")
-        .start()
-    )
-
-    invalid_book_ticker_dead_letter_df = format_dead_letter_records(
+    quote_outputs_df = _combine_clickhouse_and_dead_letter_records(
+        quote_snapshots_df,
         invalid_book_ticker_df,
+        QUOTE_SNAPSHOTS_COLUMNS,
         settings.KAFKA_SPOT_QUOTES_TOPIC,
     )
-    invalid_book_ticker_query = (
-        invalid_book_ticker_dead_letter_df.writeStream
-        .queryName("invalid_spot_quotes_to_dlq_v2")
-        .format("kafka")
-        .option("kafka.bootstrap.servers", settings.KAFKA_BOOTSTRAP_SERVERS)
-        .option("topic", settings.KAFKA_DEAD_LETTER_TOPIC)
+    quote_outputs_query = (
+        quote_outputs_df.writeStream
+        .queryName("spot_quote_outputs_v3")
+        .outputMode("append")
+        .foreachBatch(_write_quote_outputs_batch)
         .option(
             "checkpointLocation",
-            _checkpoint_location("invalid_spot_quotes_to_dlq_v2"),
+            _checkpoint_location("spot_quote_outputs_v3"),
         )
-        .outputMode("append")
         .trigger(processingTime="10 seconds")
         .start()
     )
 
     return [
-        clickhouse_query,
+        trade_outputs_query,
         market_candles_query,
-        market_alerts_clickhouse_query,
-        market_alerts_kafka_query,
-        dead_letter_query,
-        quote_snapshots_query,
-        invalid_book_ticker_query,
+        market_alerts_outputs_query,
+        quote_outputs_query,
     ]
 
 

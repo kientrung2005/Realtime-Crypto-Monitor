@@ -45,7 +45,7 @@ class SparkConnect:
             .config("spark.executor.memory", settings.SPARK_EXECUTOR_MEMORY)
             .config(
                 "spark.sql.shuffle.partitions",
-                str(settings.KAFKA_NUM_PARTITIONS),
+                str(settings.SPARK_SQL_SHUFFLE_PARTITIONS),
             )
             .config("spark.sql.session.timeZone", "UTC")
             .config("spark.sql.caseSensitive", "true")

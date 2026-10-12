@@ -133,6 +133,14 @@ class Settings:
     SPARK_WORKER_MEMORY: str = os.getenv("SPARK_WORKER_MEMORY", "2g")
     SPARK_DRIVER_MEMORY: str = os.getenv("SPARK_DRIVER_MEMORY", "1g")
     SPARK_EXECUTOR_MEMORY: str = os.getenv("SPARK_EXECUTOR_MEMORY", "2g")
+    SPARK_SQL_SHUFFLE_PARTITIONS: int = _get_int(
+        "SPARK_SQL_SHUFFLE_PARTITIONS",
+        SPARK_WORKER_CORES,
+    )
+    SPARK_MAX_OFFSETS_PER_TRIGGER: int = _get_int(
+        "SPARK_MAX_OFFSETS_PER_TRIGGER",
+        50_000,
+    )
     SPARK_CHECKPOINT_LOCATION: str = os.getenv(
         "SPARK_CHECKPOINT_LOCATION",
         "/opt/spark/checkpoints",
