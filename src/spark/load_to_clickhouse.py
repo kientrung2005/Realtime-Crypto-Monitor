@@ -25,6 +25,7 @@ from src.spark.transformation import (
     transform_agg_trades,
     transform_book_tickers,
 )
+from src.storage.minio_writer import write_parquet_batch
 
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,8 @@ MARKET_ALERTS_COLUMNS = (
 CLICKHOUSE_INSERT_BATCH_SIZE = 5_000
 CLICKHOUSE_RECORD = "clickhouse"
 DEAD_LETTER_RECORD = "dead_letter"
+TRADES_ARCHIVE = "trades"
+QUOTES_ARCHIVE = "quotes"
 
 
 def _checkpoint_location(query_name: str) -> str:
@@ -138,7 +141,7 @@ def _write_table_batch(
     batch_id: int,
     table: str,
     columns: tuple[str, ...],
-) -> None:
+) -> int:
     rows = batch_df.select(*columns).toLocalIterator()
     inserted_rows = 0
 
@@ -167,6 +170,7 @@ def _write_table_batch(
         inserted_rows,
         table,
     )
+    return inserted_rows
 
 
 def _write_market_candles_batch(batch_df: DataFrame, batch_id: int) -> None:
@@ -243,15 +247,28 @@ def _write_clickhouse_and_dead_letter_batch(
     batch_id: int,
     table: str,
     columns: tuple[str, ...],
+    archive_dataset: str,
+    archive_event_time_column: str,
 ) -> None:
     batch_df.persist()
     try:
-        _write_table_batch(
-            batch_df.filter(col("_record_target") == CLICKHOUSE_RECORD),
+        clickhouse_df = batch_df.filter(
+            col("_record_target") == CLICKHOUSE_RECORD
+        )
+        inserted_rows = _write_table_batch(
+            clickhouse_df,
             batch_id,
             table,
             columns,
         )
+        if inserted_rows > 0:
+            write_parquet_batch(
+                clickhouse_df,
+                batch_id,
+                archive_dataset,
+                columns,
+                archive_event_time_column,
+            )
         _write_kafka_batch(
             batch_df.filter(col("_record_target") == DEAD_LETTER_RECORD),
             batch_id,
@@ -267,6 +284,8 @@ def _write_trade_outputs_batch(batch_df: DataFrame, batch_id: int) -> None:
         batch_id,
         AGG_TRADES_TABLE,
         AGG_TRADES_COLUMNS,
+        TRADES_ARCHIVE,
+        "trade_time",
     )
 
 
@@ -276,6 +295,8 @@ def _write_quote_outputs_batch(batch_df: DataFrame, batch_id: int) -> None:
         batch_id,
         QUOTE_SNAPSHOTS_TABLE,
         QUOTE_SNAPSHOTS_COLUMNS,
+        QUOTES_ARCHIVE,
+        "snapshot_time",
     )
 
 

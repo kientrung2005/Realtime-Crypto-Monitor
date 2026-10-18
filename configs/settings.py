@@ -16,6 +16,15 @@ def _get_float(name: str, default: float) -> float:
     return float(os.getenv(name, str(default)))
 
 
+def _get_bool(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _get_symbols(name: str, default: str) -> tuple[str, ...]:
     raw_symbols = os.getenv(name, default)
     return tuple(
@@ -174,6 +183,31 @@ class Settings:
     )
     CLICKHOUSE_USER: str = os.getenv("CLICKHOUSE_USER", "crypto_user")
     CLICKHOUSE_PASSWORD: str = os.getenv("CLICKHOUSE_PASSWORD", "")
+
+    MINIO_ENDPOINT_HOST: str = os.getenv("MINIO_ENDPOINT", "localhost:9002")
+    MINIO_ENDPOINT_DOCKER: str = os.getenv(
+        "MINIO_ENDPOINT_DOCKER",
+        "minio:9000",
+    )
+    MINIO_ENDPOINT: str = (
+        MINIO_ENDPOINT_DOCKER if IN_DOCKER else MINIO_ENDPOINT_HOST
+    )
+    MINIO_SECURE: bool = _get_bool("MINIO_SECURE", False)
+    MINIO_ACCESS_KEY: str = os.getenv("MINIO_ACCESS_KEY", "crypto_minio")
+    MINIO_SECRET_KEY: str = os.getenv(
+        "MINIO_SECRET_KEY",
+        "crypto_minio_password",
+    )
+    MINIO_BUCKET: str = os.getenv(
+        "MINIO_BUCKET",
+        "crypto-market-data",
+    )
+    MINIO_REGION: str = os.getenv("MINIO_REGION", "us-east-1")
+    MINIO_RETENTION_DAYS: int = _get_int("MINIO_RETENTION_DAYS", 30)
+    MINIO_ARCHIVE_PREFIX: str = os.getenv(
+        "MINIO_ARCHIVE_PREFIX",
+        "market-data",
+    )
 
 
 settings = Settings()

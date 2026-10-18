@@ -14,6 +14,8 @@ KAFKA_CONNECTOR_PACKAGE = (
     "org.apache.spark:spark-sql-kafka-0-10_2.12:"
     f"{pyspark.__version__}"
 )
+HADOOP_AWS_PACKAGE = "org.apache.hadoop:hadoop-aws:3.3.4"
+SPARK_PACKAGES = f"{KAFKA_CONNECTOR_PACKAGE},{HADOOP_AWS_PACKAGE}"
 
 
 class SparkConnect:
@@ -38,7 +40,7 @@ class SparkConnect:
                 "spark.jars.ivy",
                 settings.SPARK_IVY_CACHE_LOCATION,
             )
-            .config("spark.jars.packages", KAFKA_CONNECTOR_PACKAGE)
+            .config("spark.jars.packages", SPARK_PACKAGES)
             .config("spark.pyspark.python", executor_python)
             .config("spark.pyspark.driver.python", driver_python)
             .config("spark.driver.memory", settings.SPARK_DRIVER_MEMORY)
@@ -50,6 +52,38 @@ class SparkConnect:
             .config("spark.sql.session.timeZone", "UTC")
             .config("spark.sql.caseSensitive", "true")
             .config("spark.sql.ansi.enabled", "false")
+            .config(
+                "spark.hadoop.fs.s3a.impl",
+                "org.apache.hadoop.fs.s3a.S3AFileSystem",
+            )
+            .config(
+                "spark.hadoop.fs.s3a.endpoint",
+                (
+                    f"{'https' if settings.MINIO_SECURE else 'http'}://"
+                    f"{settings.MINIO_ENDPOINT}"
+                ),
+            )
+            .config(
+                "spark.hadoop.fs.s3a.endpoint.region",
+                settings.MINIO_REGION,
+            )
+            .config("spark.hadoop.fs.s3a.path.style.access", "true")
+            .config(
+                "spark.hadoop.fs.s3a.connection.ssl.enabled",
+                str(settings.MINIO_SECURE).lower(),
+            )
+            .config(
+                "spark.hadoop.fs.s3a.aws.credentials.provider",
+                "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+            )
+            .config(
+                "spark.hadoop.fs.s3a.access.key",
+                settings.MINIO_ACCESS_KEY,
+            )
+            .config(
+                "spark.hadoop.fs.s3a.secret.key",
+                settings.MINIO_SECRET_KEY,
+            )
         )
 
         if settings.IN_DOCKER:
