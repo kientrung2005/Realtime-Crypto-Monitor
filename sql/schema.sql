@@ -71,6 +71,40 @@ TTL snapshot_time + INTERVAL 3 DAY DELETE
 SETTINGS index_granularity = 8192;
 
 
+-- Every significant comparison triggered by a new Spot quote against a recent quote on another exchange.
+CREATE TABLE IF NOT EXISTS crypto_market.fact_exchange_price_spreads
+(
+    market_type LowCardinality(String),
+    symbol LowCardinality(String),
+    comparison_time DateTime64(3, 'UTC'),
+    exchange_a LowCardinality(String),
+    exchange_b LowCardinality(String),
+    trigger_exchange LowCardinality(String),
+    trigger_update_id Int64,
+    quote_time_a DateTime64(3, 'UTC'),
+    quote_time_b DateTime64(3, 'UTC'),
+    mid_price_a Decimal(38, 18),
+    mid_price_b Decimal(38, 18),
+    spread_usdt Decimal(38, 18),
+    spread_percentage Decimal(38, 18),
+    recorded_at DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(recorded_at)
+PARTITION BY toDate(comparison_time)
+ORDER BY (market_type, symbol, exchange_a, exchange_b, comparison_time, trigger_exchange, trigger_update_id)
+TTL comparison_time + INTERVAL 7 DAY DELETE
+SETTINGS index_granularity = 8192;
+
+CREATE OR REPLACE VIEW crypto_market.fact_exchange_price_spreads_latest AS
+SELECT *
+FROM crypto_market.fact_exchange_price_spreads FINAL;
+
+-- Keep the previous Superset dataset name pointing to the new event-level results.
+CREATE OR REPLACE VIEW crypto_market.agg_exchange_price_spreads_latest AS
+SELECT *
+FROM crypto_market.fact_exchange_price_spreads_latest;
+
+
 -- 4. OHLCV and market metrics calculated for each time window.
 CREATE TABLE IF NOT EXISTS crypto_market.agg_market_candles
 (

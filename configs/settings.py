@@ -113,6 +113,14 @@ class Settings:
         "QUOTE_SNAPSHOT_WATERMARK_SECONDS",
         5,
     )
+    EXCHANGE_SPREAD_MAX_SKEW_SECONDS: int = _get_int(
+        "EXCHANGE_SPREAD_MAX_SKEW_SECONDS",
+        2,
+    )
+    EXCHANGE_SPREAD_MIN_PERCENT: float = _get_float(
+        "EXCHANGE_SPREAD_MIN_PERCENT",
+        0.01,
+    )
     ALERT_CANDLE_WATERMARK_SECONDS: int = _get_int(
         "ALERT_CANDLE_WATERMARK_SECONDS",
         10,
