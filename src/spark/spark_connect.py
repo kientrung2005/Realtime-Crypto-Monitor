@@ -49,6 +49,8 @@ class SparkConnect:
                 "spark.sql.shuffle.partitions",
                 str(settings.SPARK_SQL_SHUFFLE_PARTITIONS),
             )
+            .config("spark.scheduler.mode", "FAIR")
+            .config("spark.sql.adaptive.enabled", "false")
             .config("spark.sql.session.timeZone", "UTC")
             .config("spark.sql.caseSensitive", "true")
             .config("spark.sql.ansi.enabled", "false")
@@ -83,6 +85,12 @@ class SparkConnect:
             .config(
                 "spark.hadoop.fs.s3a.secret.key",
                 settings.MINIO_SECRET_KEY,
+            )
+            .config("spark.hadoop.fs.s3a.fast.upload", "true")
+            .config("spark.hadoop.fs.s3a.fast.upload.buffer", "disk")
+            .config(
+                "spark.hadoop.mapreduce.fileoutputcommitter.marksuccessfuljobs",
+                "false",
             )
         )
 

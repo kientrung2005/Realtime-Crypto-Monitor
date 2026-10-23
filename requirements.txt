@@ -1,5 +1,6 @@
 clickhouse-connect==1.8.0
 confluent-kafka==2.15.1
+duckdb==1.4.1
 minio==7.2.20
 python-dotenv==1.2.3
 websockets==16.1.1

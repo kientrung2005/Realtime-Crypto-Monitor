@@ -9,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from configs.settings import settings
 from src.storage.minio_client import MinIOStorageClient
+from src.storage.minio_writer import MinioArchiveCompactor
 
 
 logger = logging.getLogger(__name__)
@@ -25,17 +26,23 @@ def main() -> None:
     while True:
         try:
             storage.initialize()
-            logger.info(
-                "MinIO bucket %s is ready with %d-day retention",
-                settings.MINIO_BUCKET,
-                settings.MINIO_RETENTION_DAYS,
-            )
-            return
+            break
         except Exception:
             if time.monotonic() >= deadline:
                 raise
             logger.info("Waiting for MinIO to become ready")
             time.sleep(2)
+
+    logger.info(
+        "MinIO bucket %s is ready with %d-day retention",
+        settings.MINIO_BUCKET,
+        settings.MINIO_RETENTION_DAYS,
+    )
+    if settings.MINIO_COMPACTION_ENABLED:
+        try:
+            MinioArchiveCompactor().compact_once()
+        except Exception:
+            logger.exception("Initial MinIO archive compaction failed")
 
 
 if __name__ == "__main__":

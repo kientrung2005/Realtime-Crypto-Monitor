@@ -25,7 +25,7 @@ from src.spark.transformation import (
     transform_agg_trades,
     transform_book_tickers,
 )
-from src.storage.minio_writer import write_parquet_batch
+from src.storage.minio_writer import MinioArchiveCompactor, write_parquet_batch
 
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,7 @@ CLICKHOUSE_RECORD = "clickhouse"
 DEAD_LETTER_RECORD = "dead_letter"
 TRADES_ARCHIVE = "trades"
 QUOTES_ARCHIVE = "quotes"
+STREAMING_TRIGGER = f"{settings.SPARK_STREAMING_TRIGGER_SECONDS} seconds"
 
 
 def _checkpoint_location(query_name: str) -> str:
@@ -359,7 +360,7 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
             "checkpointLocation",
             _checkpoint_location("spot_trade_outputs_v3"),
         )
-        .trigger(processingTime="10 seconds")
+        .trigger(processingTime=STREAMING_TRIGGER)
         .start()
     )
 
@@ -373,7 +374,7 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
             "checkpointLocation",
             _checkpoint_location("spot_market_candles_1m_to_clickhouse_v3"),
         )
-        .trigger(processingTime="10 seconds")
+        .trigger(processingTime=STREAMING_TRIGGER)
         .start()
     )
 
@@ -408,7 +409,7 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
             "checkpointLocation",
             _checkpoint_location("spot_market_alert_outputs_v3"),
         )
-        .trigger(processingTime="10 seconds")
+        .trigger(processingTime=STREAMING_TRIGGER)
         .start()
     )
 
@@ -443,7 +444,7 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
             "checkpointLocation",
             _checkpoint_location("spot_quote_outputs_v3"),
         )
-        .trigger(processingTime="10 seconds")
+        .trigger(processingTime=STREAMING_TRIGGER)
         .start()
     )
 
@@ -458,9 +459,11 @@ def _start_queries(spark: SparkSession) -> list[StreamingQuery]:
 def run() -> None:
     spark = SparkConnect.create_spark_session()
     queries: list[StreamingQuery] = []
+    compactor = MinioArchiveCompactor()
 
     try:
         queries = _start_queries(spark)
+        compactor.start()
         logger.info(
             "Spark is consuming %s and %s; writing trades to %s, "
             "1-minute candles to %s, quote snapshots to %s, and alerts to %s",
@@ -473,6 +476,7 @@ def run() -> None:
         )
         spark.streams.awaitAnyTermination()
     finally:
+        compactor.stop()
         for query in queries:
             if query.isActive:
                 query.stop()

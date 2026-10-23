@@ -138,7 +138,7 @@ class Settings:
     SPARK_MASTER_URL: str = (
         SPARK_MASTER_URL_DOCKER if IN_DOCKER else SPARK_MASTER_URL_HOST
     )
-    SPARK_WORKER_CORES: int = _get_int("SPARK_WORKER_CORES", 2)
+    SPARK_WORKER_CORES: int = _get_int("SPARK_WORKER_CORES", 4)
     SPARK_WORKER_MEMORY: str = os.getenv("SPARK_WORKER_MEMORY", "2g")
     SPARK_DRIVER_MEMORY: str = os.getenv("SPARK_DRIVER_MEMORY", "1g")
     SPARK_EXECUTOR_MEMORY: str = os.getenv("SPARK_EXECUTOR_MEMORY", "2g")
@@ -149,6 +149,10 @@ class Settings:
     SPARK_MAX_OFFSETS_PER_TRIGGER: int = _get_int(
         "SPARK_MAX_OFFSETS_PER_TRIGGER",
         50_000,
+    )
+    SPARK_STREAMING_TRIGGER_SECONDS: int = _get_int(
+        "SPARK_STREAMING_TRIGGER_SECONDS",
+        20,
     )
     SPARK_CHECKPOINT_LOCATION: str = os.getenv(
         "SPARK_CHECKPOINT_LOCATION",
@@ -207,6 +211,30 @@ class Settings:
     MINIO_ARCHIVE_PREFIX: str = os.getenv(
         "MINIO_ARCHIVE_PREFIX",
         "market-data",
+    )
+    MINIO_ARCHIVE_OUTPUT_PARTITIONS: int = _get_int(
+        "MINIO_ARCHIVE_OUTPUT_PARTITIONS",
+        1,
+    )
+    MINIO_COMPACTION_ENABLED: bool = _get_bool(
+        "MINIO_COMPACTION_ENABLED",
+        True,
+    )
+    MINIO_COMPACTION_INITIAL_DELAY_SECONDS: int = _get_int(
+        "MINIO_COMPACTION_INITIAL_DELAY_SECONDS",
+        120,
+    )
+    MINIO_COMPACTION_INTERVAL_SECONDS: int = _get_int(
+        "MINIO_COMPACTION_INTERVAL_SECONDS",
+        900,
+    )
+    MINIO_COMPACTION_MIN_AGE_MINUTES: int = _get_int(
+        "MINIO_COMPACTION_MIN_AGE_MINUTES",
+        10,
+    )
+    MINIO_COMPACTION_MIN_FILES: int = _get_int(
+        "MINIO_COMPACTION_MIN_FILES",
+        2,
     )
 
 

@@ -100,7 +100,7 @@ services:
       - org.apache.spark.deploy.worker.Worker
       - spark://spark-master:7077
     environment:
-      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-2}
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-4}
       SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-2g}
       SPARK_WORKER_WEBUI_PORT: 8081
     ports:
